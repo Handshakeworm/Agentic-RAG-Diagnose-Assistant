@@ -8,7 +8,7 @@
 2. followup_questions 非空 → "followup"
 3. 其他 → "diagnose"
 
-⑤ 节点已内聚三重过滤(可问性/增益阈值/候选池耗尽),路由器只看 followup_questions 非空。
+④ 节点已内聚三重过滤(可问性/增益阈值/候选池耗尽),路由器只看 followup_questions 非空。
 """
 from __future__ import annotations
 

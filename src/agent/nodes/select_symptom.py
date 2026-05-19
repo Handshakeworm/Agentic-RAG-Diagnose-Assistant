@@ -1,4 +1,4 @@
-"""src/agent/nodes/select_symptom.py — Agent ⑤ select_discriminative_symptom(DEV_SPEC §4.1.2 ⑤)。
+"""src/agent/nodes/select_symptom.py — Agent ④ select_discriminative_symptom(DEV_SPEC §4.1.2 ④)。
 
 1 次 LLM 调用直接选追问项,不再走"TF-IDF 抽症状 + 信息增益 + 可问性评估"那条
 重工程化路径(实测 ④ TF-IDF 抽出来 94% 是医学教材通用高频词而非鉴别症状,

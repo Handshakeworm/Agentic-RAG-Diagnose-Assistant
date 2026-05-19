@@ -3,9 +3,9 @@
 注册 15 节点 + 2 条件边,顺序与 4.1.3 流程图严格一致:
 
   ① info_collect → ①.5 analyze_initial_reports → ② build_query → ③ retrieve →
-  ⑤ select_discriminative_symptom →
+  ④ select_discriminative_symptom →
     ┌─[should_continue 路由]─┐
-    │  followup → ⑥a generate_followup → ⑥b wait_followup_answer (interrupt) →
+    │  followup → ⑤ generate_followup → ⑥ wait_followup_answer (interrupt) →
     │             ⑦ process_followup_answer → ② build_query (loop)
     └─ diagnose → ⑩ diagnose →
        ┌─[diagnose_router 路由]─┐
@@ -13,7 +13,7 @@
        │                   ⑨ process_exam_result → ② build_query (loop)
        └─ safety_gate → ⑪ safety_gate → ⑫ generate_advice → ⑬ format_response → END
 
-注:④ extract_symptoms 节点已删除 — ⑤ 重设计为 1 LLM 直接从 state 选追问
+注:④ extract_symptoms 节点已删除 — ④ 重设计为 1 LLM 直接从 state 选追问
 (空 slot 维度填补 + 开放式症状兜底),不再依赖 ④ 抽出来的关键词。
 
 `build_graph()` 返回未编译的 StateGraph(便于测试时注入 checkpointer);
@@ -68,13 +68,13 @@ def build_graph() -> StateGraph:
     # 入口
     workflow.set_entry_point("info_collect")
 
-    # 顺序边 ①→①.5→②→③→⑤(④ 已删)
+    # 顺序边 ①→①.5→②→③→④(④ 已删)
     workflow.add_edge("info_collect", "analyze_initial_reports")
     workflow.add_edge("analyze_initial_reports", "build_query")
     workflow.add_edge("build_query", "retrieve")
     workflow.add_edge("retrieve", "select_discriminative_symptom")
 
-    # 条件边:⑤ → 追问 / 诊断
+    # 条件边:④ → 追问 / 诊断
     workflow.add_conditional_edges(
         "select_discriminative_symptom",
         should_continue,
@@ -84,7 +84,7 @@ def build_graph() -> StateGraph:
         },
     )
 
-    # 追问循环:⑥a → ⑥b → ⑦ → ②
+    # 追问循环:⑤ → ⑥ → ⑦ → ②
     workflow.add_edge("generate_followup", "wait_followup_answer")
     workflow.add_edge("wait_followup_answer", "process_followup_answer")
     workflow.add_edge("process_followup_answer", "build_query")

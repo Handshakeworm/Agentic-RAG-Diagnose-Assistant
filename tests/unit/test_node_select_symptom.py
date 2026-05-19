@@ -1,6 +1,6 @@
-"""tests/unit/test_node_select_symptom.py — F6 ⑤ select_discriminative_symptom 单元测试。
+"""tests/unit/test_node_select_symptom.py — F6 ④ select_discriminative_symptom 单元测试。
 
-⑤ 重设计后只剩 1 处 LLM 调用,LLM 同时出:追问项(questions)+ unaskable 粗筛
+④ 重设计后只剩 1 处 LLM 调用,LLM 同时出:追问项(questions)+ unaskable 粗筛
 (unaskable_symptoms)。Mock LLM 返回 SmartFollowupOutput,验证主入口边界:
 - LLM 出 slot + open 混合 → followup_questions 正确转储
 - LLM 出空 questions → followup_questions 为空(信息已足,跳诊断)
@@ -76,7 +76,7 @@ def test_empty_questions_means_info_sufficient(mock_llm):
 def test_unaskable_symptoms_passes_through(mock_llm):
     """LLM 输出的 unaskable_symptoms 应原样转 dict 写入 state。
 
-    后续 ⑩ Step 3 会基于诊断结果再次精筛覆盖,这一步只验证 ⑤ 的转储不丢/不改字段。
+    后续 ⑩ Step 3 会基于诊断结果再次精筛覆盖,这一步只验证 ④ 的转储不丢/不改字段。
     """
     from src.agent.nodes.select_symptom import select_discriminative_symptom
 

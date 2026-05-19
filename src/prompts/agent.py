@@ -178,7 +178,7 @@ def build_query_construction_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑤ select_discriminative_symptom — Smart followup(1 LLM)
+# ④ select_discriminative_symptom — Smart followup(1 LLM)
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -192,7 +192,7 @@ def build_smart_followup_prompt(
     uncertain_symptoms: list[str],
     quota: int,
 ) -> str:
-    """⑤ 1 次 LLM 同时出 questions(追问) + unaskable_symptoms(粗筛)。"""
+    """④ 1 次 LLM 同时出 questions(追问) + unaskable_symptoms(粗筛)。"""
     filled_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
     filled_block = "\n".join(filled_lines) if filled_lines else "  (无,全部空缺)"
     empty_block = ", ".join(empty_slots) or "(无,13 维已全部填满)"
@@ -246,7 +246,7 @@ def build_smart_followup_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑥a generate_followup
+# ⑤ generate_followup
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -256,7 +256,7 @@ def build_followup_question_prompt(
     confirmed_symptoms: list[str],
     denied_symptoms: list[str],
 ) -> str:
-    """⑥a 生成两种 type(slot 维度填补 + open 开放式)追问问题,患者口语风格。"""
+    """⑤ 生成两种 type(slot 维度填补 + open 开放式)追问问题,患者口语风格。"""
     items = []
     for q in questions:
         if q.get("type") == "slot":
@@ -424,7 +424,7 @@ def build_diagnose_prompt(
         chief_complaint / present_illness: 患者叙事(原文)
         confirmed_symptoms / denied_symptoms / uncertain_symptoms / slots /
             history_summary / report_findings: 多轮 followup 累积的患者画像
-        unaskable_symptoms: ⑤ 写入的粗筛版({description, reason}),供 LLM 产 retained_unaskable
+        unaskable_symptoms: ④ 写入的粗筛版({description, reason}),供 LLM 产 retained_unaskable
     """
     # 父块文本:对齐评测口径,不截断(LLM 1M context,信息全给)
     parents_block = "\n\n".join(
@@ -469,7 +469,7 @@ def build_diagnose_prompt(
 【检查报告发现】
 {reports_block}
 
-【⑤ 写入的 unaskable 粗筛(LLM 想知道但患者答不上的体征,供 retained_unaskable 精筛参考)】
+【④ 写入的 unaskable 粗筛(LLM 想知道但患者答不上的体征,供 retained_unaskable 精筛参考)】
 {unaskable_block}
 
 【医学文献文本(RAG 召回 Top-{len(parent_texts)} 父块 + table HTML,按相关性顺序)】
@@ -491,7 +491,7 @@ def build_diagnose_prompt(
      * **top1 决定后续路由**:`need_exam` → 走 ⑧ recommend_exam;其他 → 走 ⑪ safety_gate;
        top2/top3 沿用 top1 的值即可(router 只看 top1)
    - failure_reason:**保持 null**(由节点代码在兜底路径填,不在 LLM 职责范围)
-3. retained_unaskable(基于诊断结果挑/改写,从【⑤ 写入的 unaskable 粗筛】里精筛):
+3. retained_unaskable(基于诊断结果挑/改写,从【④ 写入的 unaskable 粗筛】里精筛):
    - top1=`confirmed` → 通常返空列表(证据已闭环,无需再查)
    - top1=`insufficient` → 通常返空列表(检查也救不回信息不足)
    - top1=`need_exam` → **至少保留 1 条**,只留对当前 top 候选鉴别真正关键的;描述可改写

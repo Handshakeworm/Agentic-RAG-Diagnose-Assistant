@@ -1,7 +1,7 @@
-"""src/agent/nodes/wait_followup_answer.py — Agent ⑥b wait_followup_answer(DEV_SPEC §4.1.5)。
+"""src/agent/nodes/wait_followup_answer.py — Agent ⑥ wait_followup_answer(DEV_SPEC §4.1.5)。
 
 调 `langgraph.types.interrupt(...)` 暂停图执行,等待用户回答;恢复时只重执行本节点
-(轻量),避免重复调 LLM(⑥a 已生成的 followup_question 不会再调一次)。
+(轻量),避免重复调 LLM(⑤ 已生成的 followup_question 不会再调一次)。
 """
 from __future__ import annotations
 

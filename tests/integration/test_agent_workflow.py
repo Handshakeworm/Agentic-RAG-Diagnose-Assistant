@@ -73,8 +73,8 @@ def stub_dbs():
             "src.agent.nodes.retrieve.lookup_chunk_summary_question",
             return_value={},
         ),
-        # 直接 stub graph 持有的 ⑤ 函数引用 — 集成测重点是 graph 编排(进出节点 +
-        # 路由判断),不是 ⑤ 内部 LLM 逻辑(已在 unit 测覆盖)。④ extract_symptoms
+        # 直接 stub graph 持有的 ④ 函数引用 — 集成测重点是 graph 编排(进出节点 +
+        # 路由判断),不是 ④ 内部 LLM 逻辑(已在 unit 测覆盖)。④ extract_symptoms
         # 节点已删,不再 stub
         patch(
             "src.agent.graph.select_discriminative_symptom",
@@ -156,7 +156,7 @@ def test_normal_confirmed_path(stub_dbs):
         # ② EL: 三层归一化(无 LLM,Tier 1 走 query_term_by_alias_exact mock 命中)
         # ② Query
         QueryConstructionOutput(dense_query="进食后上腹胀痛"),
-        # ⑤ select_symptom: 已在 stub 里直接返回空 followup,跳过 LLM 调用
+        # ④ select_symptom: 已在 stub 里直接返回空 followup,跳过 LLM 调用
         # ⑩ diagnose 1 步 LLM 输出
         DiagnosisOutput(results=[
             RankedDisease(
@@ -244,7 +244,7 @@ def test_followup_round_capped_path(stub_dbs):
         # ② build_query:check path(followup_round == last_nlu_round 且非首轮)→
         #     跳 NER + EL,只跑 Step 4 Query 构建
         QueryConstructionOutput(dense_query="x"),
-        # ⑤ select_symptom 已被 stub 替代(无 LLM 调用)
+        # ④ select_symptom 已被 stub 替代(无 LLM 调用)
         # ⑩ Step -1 触顶,跳过 LLM(0 个)
         # ⑪ safety_gate
         SafetyGateOutput(additional_risks=[]),

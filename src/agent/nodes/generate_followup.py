@@ -1,9 +1,9 @@
-"""src/agent/nodes/generate_followup.py — Agent ⑥a generate_followup(DEV_SPEC §4.1.2 ⑥)。
+"""src/agent/nodes/generate_followup.py — Agent ⑤ generate_followup(DEV_SPEC §4.1.2 ⑤+⑥)。
 
 LLM 把 followup_questions(混合维度+症状)合并成 2-3 句口语化追问。
 **自由文本输出**(无 schema)— 按 §9.4 / §9.1 模板裸写,schema 标签固定 "free_text"。
-拆分点:LLM 调用与 interrupt 等待分属两个节点(⑥a / ⑥b),避免 interrupt 恢复时
-重复调 LLM(spec §4.1.2 ⑥ 拆分设计注)。
+拆分点:LLM 调用与 interrupt 等待分属两个节点(⑤ / ⑥),避免 interrupt 恢复时
+重复调 LLM(spec §4.1.2 ⑤+⑥ 拆分设计注)。
 """
 from __future__ import annotations
 

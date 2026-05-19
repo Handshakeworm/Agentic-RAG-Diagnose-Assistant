@@ -131,9 +131,9 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── info_collect.py         # 节点 ①：主诉提取 + 病史/报告加载（单轮无交互）
 │   │   │   ├── analyze_initial_reports.py  # 节点 ①.5：初始报告解析（多模态 LLM 直读，提取结构化发现）
 │   │   │   ├── build_query.py          # 节点 ②:NER + Sparse 多字段直采 + Query 构建/改写│   │   │   ├── retrieve.py             # 节点 ③：全量向量召回
-│   │   │   ├── select_symptom.py       # 节点 ⑤:智能追问选择(1 LLM,slot 维度填补 + open 兜底)
-│   │   │   ├── generate_followup.py    # 节点 ⑥a：生成追问问题
-│   │   │   ├── wait_followup_answer.py # 节点 ⑥b：interrupt 等待用户回答
+│   │   │   ├── select_symptom.py       # 节点 ④:智能追问选择(1 LLM,slot 维度填补 + open 兜底)
+│   │   │   ├── generate_followup.py    # 节点 ⑤：生成追问问题
+│   │   │   ├── wait_followup_answer.py # 节点 ⑥：interrupt 等待用户回答
 │   │   │   ├── process_followup.py     # 节点 ⑦：处理追问回答
 │   │   │   ├── recommend_exam.py       # 节点 ⑧a：生成检查建议
 │   │   │   ├── wait_exam_report.py     # 节点 ⑧b：interrupt 等待检查结果回传
@@ -298,7 +298,7 @@ Agentic-RAG-Medical-care-Assistant/
 | 3.2.1 查询预处理 | `src/rag/retrieval/query_processing.py` |
 | 3.2.2 召回（Dense + Sparse + RRF） | `src/rag/retrieval/` |
 | 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置） | `src/rag/retrieval/reranker.py` |
-| 4.1 Agent 工作流（15 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑥/⑧ 各拆 a/b）+ `routers/`（should_continue / diagnose_router） |
+| 4.1 Agent 工作流（15 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑧ 拆 a/b — 原 ⑥a/⑥b 已平铺为 ⑤/⑥）+ `routers/`（should_continue / diagnose_router） |
 | 4.2 上下文管理 | `src/rag/context/` |
 | 5.1 Redis 缓存 | `src/db/redis/cache.py` |
 | 5.2 监控层 | `infra/prometheus/` + `infra/grafana/` + `infra/loki/` |
@@ -323,7 +323,7 @@ Agentic-RAG-Medical-care-Assistant/
 - FastAPI 应用（`src/api/app.py`），提供诊断、患者管理、健康检查、管理等路由
 - 请求/响应 Schema 校验（`src/api/schemas/`）
 - 状态图驱动的多步诊断流程(`src/agent/graph.py`),HPI 13 维填空驱动的迭代式追问工作流
-- 节点(15 个):病史采集、初始报告解析、Query 构建、向量召回、智能追问选择、追问生成(⑥a)、追问等待(⑥b)、追问处理、建议检查(⑧a)、检查结果等待(⑧b)、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复(`src/agent/nodes/`)
+- 节点(15 个):病史采集、初始报告解析、Query 构建、向量召回、智能追问选择、追问生成(⑤)、追问等待(⑥)、追问处理、建议检查(⑧a)、检查结果等待(⑧b)、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复(`src/agent/nodes/`)
 - 路由器（2 个）：should_continue（追问/诊断两路路由）、diagnose_router（诊断后路由：need_exam / safety_gate）（`src/agent/routers/`）
 - 数据摄取 Pipeline：MinerU 文档解析 → Chunking → LLM 增强（摘要/问题生成/图片描述） → 幂等写入 → Embedding → 向量存储（`src/rag/ingestion/`）
 - 检索 Pipeline：查询处理 → Dense/Sparse 双路检索 → RRF 融合（`src/rag/retrieval/`）
@@ -765,7 +765,7 @@ CREATE INDEX idx_raw_documents_content_list_gin ON raw_documents USING GIN (cont
 | 字段 | 来源 | 主要用途 |
 |------|------|---------|
 | `markdown_content` | `target_document.md` | 渲染产物(同信息以 markdown 文本形式呈现),保留作为 raw 备份与版面追溯辅助。**chunking 不消费此字段**,所有切分逻辑直接读 `content_list`(§3.1.2 切分主流程基于 mineru block 结构,不基于 markdown 字符流) |
-| `content_list` | `content_list_v2.json` | 页级嵌套结构(详见 §2.4.4.1);chunking 阶段是**唯一输入**,用作:① 目录页提取本书目录权威清单(§3.1.2 Step 1)、② 正文 title block 匹配字典找节边界(§3.1.2 Step 2)、③ 节内 paragraph/title/list 等 block 累积切父块/子块、④ 识别表格/chart 块做双粒度处理、⑤ 噪音 type 过滤(黑名单);GIN 索引支持按 type 聚合查询。**注**:`title.level` 字段全是 1,无意义,不读 |
+| `content_list` | `content_list_v2.json` | 页级嵌套结构(详见 §2.4.4.1);chunking 阶段是**唯一输入**,用作:① 目录页提取本书目录权威清单(§3.1.2 Step 1)、② 正文 title block 匹配字典找节边界(§3.1.2 Step 2)、③ 节内 paragraph/title/list 等 block 累积切父块/子块、④ 识别表格/chart 块做双粒度处理、④ 噪音 type 过滤(黑名单);GIN 索引支持按 type 聚合查询。**注**:`title.level` 字段全是 1,无意义,不读 |
 | `middle_data` | `middle.json` | 体积最大(典型 16-84MB,极端 300MB+),含 token 级 bbox,排查解析异常时使用 |
 | `model_data` | `model.json` | 模型推理细节(典型 2-19MB),想看 mineru 模型对某块的 layout 分类置信度时翻它 |
 | `pdf_path` | 文件系统 | 原始 PDF 路径引用,PDF 本体存本地磁盘 |
@@ -1977,7 +1977,7 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     # - file_ref: 文件路径或对象存储 URL（初始报告来自 DB file_path，检查回传由 ⑨ 落盘后生成）
     # 需要多模态 LLM 读取时，由 ①.5 / ⑨ 调用 load_report(file_ref) 按需加载（图片转 base64 / PDF 直传），加载结果不写回 State
     # 注：历史 vs 本次会话新增的区分由 report_findings[i].report_date 与当前日期比较得出；审计追溯走 PostgreSQL diagnosis_records 日志，无需在 State 冗余存储
-    report_findings: list[dict]          # ①.5 和 ⑨ 从报告中提取的结构化关键发现（供 ② build_query 和 ⑤ select_symptom 直接使用）
+    report_findings: list[dict]          # ①.5 和 ⑨ 从报告中提取的结构化关键发现（供 ② build_query 和 ④ select_symptom 直接使用）
     # 每项结构：
     # {
     #   "report_type":        str,       # 报告类型：blood_routine / urine_routine / biochemistry / imaging / ecg / physical_exam / pathology / other
@@ -2010,7 +2010,7 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     # - slot type:{"type": "slot", "slot": str}(补全 HPI 13 维空槽,如 "trigger"/"aggravating")
     # - open type:{"type": "open"}(开放式问"还有别的不舒服吗?",每轮最多 1 条)
     # 为空表示信息已足/13 维已大部分填满,should_continue 路由跳诊断
-    unaskable_symptoms: list[dict]       # 两段写入:⑤ select_symptom 写粗筛版({description, reason},LLM 想知道但患者答不上的体征);⑩ diagnose 输出 retained_unaskable 覆盖粗筛 → 精筛版(基于诊断结果重判,confirmed/insufficient 通常清空、need_exam 留关键鉴别项);⑧a recommend_exam 直接消费精筛版
+    unaskable_symptoms: list[dict]       # 两段写入:④ select_symptom 写粗筛版({description, reason},LLM 想知道但患者答不上的体征);⑩ diagnose 输出 retained_unaskable 覆盖粗筛 → 精筛版(基于诊断结果重判,confirmed/insufficient 通常清空、need_exam 留关键鉴别项);⑧a recommend_exam 直接消费精筛版
     exam_round: int                      # 已建议检查的轮次（每经过 recommend_exam ⑧a +1，上限 MAX_EXAM_ROUNDS=3）
     pending_exam_results: list           # wait_exam_report ⑧b 写入（interrupt 返回的用户回传检查结果）；process_exam_result ⑨ 消费
 
@@ -2055,7 +2055,7 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
 | | `patient_input` | `str` | *(用户输入)* | 用户原始输入，不可缺省 |
 | **首节点产出** | `chief_complaint` | `str` | `""` | 由 `info_collect` ① LLM 从 `patient_input` 提取 |
 | | `present_illness` | `str` | `""` | 由 `info_collect` ① LLM 从 `patient_input` 提取 |
-| | `present_illness_slots` | `dict` | `{各字段: None/[]}` | 由 `info_collect` ① LLM 从 `patient_input` 结构化提取；`process_followup_answer` ⑦ 回填维度追问结果；空槽驱动 ⑤ 维度缺口追问 |
+| | `present_illness_slots` | `dict` | `{各字段: None/[]}` | 由 `info_collect` ① LLM 从 `patient_input` 结构化提取；`process_followup_answer` ⑦ 回填维度追问结果；空槽驱动 ④ 维度缺口追问 |
 | | `medical_history` | `dict` | `{}` | 由 `info_collect` ① 从 DB 加载（历史档案，不含主诉和现病史） |
 | | `exam_reports` | `list[dict]` | `[]` | 由 `info_collect` ① 从 DB 加载文件引用（不存 base64）；`process_exam_result` ⑨ 追加检查回传的文件引用；患者未上传报告时保持空 |
 | | `report_findings` | `list[dict]` | `[]` | 由 `analyze_initial_reports` ①.5 填充；无报告时保持空 |
@@ -2067,10 +2067,10 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
 | | `uncertain_symptoms` | `list[str]` | `[]` | `process_followup_answer` ⑦ 填充 |
 | | `followup_round` | `int` | `0` | `process_followup_answer` ⑦ 每轮 +1；Node ⑩ 入口直接读取判断上限 |
 | | `last_nlu_round` | `int` | `0` | NER 游标；首轮 `build_query` ② 完成后置为 `followup_round` |
-| | `followup_question` | `str` | `""` | `generate_followup` ⑥ 生成 |
-| | `followup_answer` | `str` | `""` | `wait_followup_answer` ⑥b（interrupt 恢复写入） |
-| | `followup_questions` | `list[dict]` | `[]` | `select_discriminative_symptom` ⑤ 填充;每项 `type: "slot"`(填补 HPI 空槽)或 `"open"`(开放式问还有别的不舒服) |
-| | `unaskable_symptoms` | `list[dict]` | `[]` | ⑤ 填粗筛版(`{description, reason}`),⑩ 1 步 LLM 输出 `retained_unaskable` 覆盖为精筛版,⑧a 消费 |
+| | `followup_question` | `str` | `""` | `generate_followup` ⑤ 生成 |
+| | `followup_answer` | `str` | `""` | `wait_followup_answer` ⑥（interrupt 恢复写入） |
+| | `followup_questions` | `list[dict]` | `[]` | `select_discriminative_symptom` ④ 填充;每项 `type: "slot"`(填补 HPI 空槽)或 `"open"`(开放式问还有别的不舒服) |
+| | `unaskable_symptoms` | `list[dict]` | `[]` | ④ 填粗筛版(`{description, reason}`),⑩ 1 步 LLM 输出 `retained_unaskable` 覆盖为精筛版,⑧a 消费 |
 | | `exam_round` | `int` | `0` | `recommend_exam` ⑧a 每轮 +1 |
 | | `pending_exam_results` | `list` | `[]` | `wait_exam_report` ⑧b 写入（interrupt 返回的用户回传检查结果）；`process_exam_result` ⑨ 消费后解析入 `exam_reports` / `report_findings` |
 | | `diagnosis_result` | `list[dict]` | `[]` | `diagnose` ⑩ 填充 |
@@ -2174,8 +2174,8 @@ result = graph.invoke(initial_state, config=config)
     - `chief_complaint`：主诉（主要症状 + 持续时间），如"腹痛3天"
     - `present_illness`：现病史（本次发病的详细展开）——起病时间与诱因、症状特点（部位/性质/程度/持续或间歇）、伴随症状、加重/缓解因素、诊疗经过
     - `present_illness_slots`：现病史结构化槽位——LLM **同时**将提取到的现病史信息填入对应槽位（onset_time / onset_mode / trigger / location / nature / severity / duration_pattern / aggravating / relieving / associated_symptoms / progression / treatment_tried / treatment_response），患者未提及的维度保持 None/空列表
-  - `present_illness`（自由文本）供 `build_query` ② 和 `diagnose` ⑩ 使用；`present_illness_slots`（结构化视图）供 `select_discriminative_symptom` ⑤ 做缺口检测
-  - 患者表述不完整的项保持空，后续追问循环（⑤→⑥→⑦）通过维度缺口追问机制定向补充
+  - `present_illness`（自由文本）供 `build_query` ② 和 `diagnose` ⑩ 使用；`present_illness_slots`（结构化视图）供 `select_discriminative_symptom` ④ 做缺口检测
+  - 患者表述不完整的项保持空，后续追问循环（④→⑤→⑥→⑦）通过维度缺口追问机制定向补充
 
   **Step 2. 历史病史加载（DB 查询，零 LLM）**
   - 以 `patient_id` 为主键，从 PostgreSQL（2.4.5）各表加载患者已有的结构化病史档案：
@@ -2220,7 +2220,7 @@ result = graph.invoke(initial_state, config=config)
 
 - **设计目的**:
   - 让报告中的客观证据在第一次 `build_query` 时就被纳入，提高初始召回精度
-  - 使 Node ⑤ 能感知"报告已有答案"从而跳过冗余追问
+  - 使 Node ④ 能感知"报告已有答案"从而跳过冗余追问
   - 使 Node ⑧ 去重逻辑更精准（基于结构化 `report_findings` 而非原文字符串匹配）
 
 
@@ -2309,7 +2309,7 @@ result = graph.invoke(initial_state, config=config)
 
 ##### ② `build_query` — NER + Query 构建/改写
 
-> **EL 移除**:原 Step 2 Entity Linking(三层归一化:Tier 1 精确别名 / Tier 2 向量阈值 / Tier 3 占位)整段删除,运行时不再查 `terms_collection`(数据资产保留备用,见 §2.4.6);原"四步"精简为"三步"(NER → Sparse 多字段直采 → Query 构建)。EL 删除后,`confirmed_symptoms` / `denied_symptoms` 字段值改为 raw text(无 preferred_term 归一化),下游 ⑤ select_symptom 的"已问去重 / 报告证据消费"由 LLM 一次语义比对承担。详细动机见 EL_DESIGN_REVIEW §11。
+> **EL 移除**:原 Step 2 Entity Linking(三层归一化:Tier 1 精确别名 / Tier 2 向量阈值 / Tier 3 占位)整段删除,运行时不再查 `terms_collection`(数据资产保留备用,见 §2.4.6);原"四步"精简为"三步"(NER → Sparse 多字段直采 → Query 构建)。EL 删除后,`confirmed_symptoms` / `denied_symptoms` 字段值改为 raw text(无 preferred_term 归一化),下游 ④ select_symptom 的"已问去重 / 报告证据消费"由 LLM 一次语义比对承担。详细动机见 EL_DESIGN_REVIEW §11。
 
 - **输入**: `chief_complaint`, `present_illness`, `present_illness_slots`, `medical_history`, `report_findings`, `confirmed_symptoms`, `denied_symptoms`, `followup_answer`(后续轮)
 - **职责**(每轮循环均完整执行以下三步):
@@ -2322,8 +2322,8 @@ result = graph.invoke(initial_state, config=config)
   - **首轮主诉症状初始化**(`followup_round == 0`,NER 输入仅含 `chief_complaint` + `present_illness`):从 NER 抽到的实体中筛选 `entity_type == 'symptom'` 且 `temporality == 'current'` 的实体,按 `negation` 分流,**直接用实体 raw text 写入**(EL 已删,不再归一化):
     - `negation == False` → 写入 `confirmed_symptoms`(如"肚子疼"→"肚子疼")
     - `negation == True` → 写入 `denied_symptoms`(如"没有发烧"→"发烧")
-    - 下游 ⑤ select_symptom 的"已问去重"由 LLM 一次语义比对承担("肚子疼"/"腹痛"同义判断不再依赖 preferred_term 精确匹配)
-  - 此步确保 Node ⑤ 选追问目标时不会向患者重复询问其主诉中已明确陈述或否认的症状
+    - 下游 ④ select_symptom 的"已问去重"由 LLM 一次语义比对承担("肚子疼"/"腹痛"同义判断不再依赖 preferred_term 精确匹配)
+  - 此步确保 Node ④ 选追问目标时不会向患者重复询问其主诉中已明确陈述或否认的症状
 
   **Step 2. Sparse 多字段直采(Sparse 路专用,2026-05-17 RETRIEVAL_EVAL §2 改造)**
   - **不查 terms_collection,无任何 alias 反查**;纯 state 字段拼接:
@@ -2356,13 +2356,13 @@ result = graph.invoke(initial_state, config=config)
 
 ##### ④ `extract_symptoms` — 已删除
 
-原"TF-IDF + EL 三层归一化"症状提取节点整段拆除,从 graph 拓扑里去掉,边 ③ retrieve → ⑤ select_symptom 直连。`state.extracted_symptoms` 字段同步删除(不再用,checkpointer 向后兼容期已过)。
+原"TF-IDF + EL 三层归一化"症状提取节点整段拆除,从 graph 拓扑里去掉,边 ③ retrieve → ④ select_symptom 直连。`state.extracted_symptoms` 字段同步删除(不再用,checkpointer 向后兼容期已过)。
 
 **为什么删除**:实测(`.eval/rag_eval/validate_node4_tfidf_el.py`):TF-IDF 抽出的关键词 94% 是医学教材通用高频词("治疗/细胞/病人")+ char n-gram 碎片("性心/受损时,"),真鉴别症状词稀疏。即使换 cTF-IDF(按 disease 聚合 corpus)能压下通用词,抽出来的鉴别词 90% 仍是医生角度的病因/病理/影像/化验术语(HP/萎缩/门静脉高压/AFP),**患者无法回答**;真正 patient-askable 的鉴别症状无法通过任何无监督算法识别(需要语义判断)。继续维护算法路是 sunk cost。
 
-**替代方案**:⑤ select_symptom 重设计为 1 次 LLM 调用,直接基于 state(主诉 + 13 维 HPI + 已确认/否认症状)产出追问 — LLM 内化的医学知识覆盖中文常见病诊断,且能天然分辨 patient-askable vs 需检查的鉴别要素。详见 ⑤ 节点定义。
+**替代方案**:④ select_symptom 重设计为 1 次 LLM 调用,直接基于 state(主诉 + 13 维 HPI + 已确认/否认症状)产出追问 — LLM 内化的医学知识覆盖中文常见病诊断,且能天然分辨 patient-askable vs 需检查的鉴别要素。详见 ④ 节点定义。
 
-##### ⑤ `select_discriminative_symptom` — 智能追问选择(1 LLM)
+##### ④ `select_discriminative_symptom` — 智能追问选择(1 LLM)
 
 > **重设计**:原"TF-IDF 关键词 + 信息增益(二元熵)+ 可问性评估 / 报告证据消费 / 已问去重(LLM 批量)"四步重工程化路径整体废弃。原因:实测 TF-IDF 抽不出真症状(94% 教材通用高频词),信息增益的可比 key 立不起来;任何无监督算法抽出的"鉴别词"对患者多数不可问(语义判断算法做不到)。改为 LLM 一次性基于 state 选追问 — 利用 LLM 内化的医学鉴别诊断知识,直接挑出 patient-askable 维度/兜底问,**同时**主动识别"想知道但患者答不上的体征"作为 unaskable 粗筛。
 
@@ -2387,16 +2387,16 @@ result = graph.invoke(initial_state, config=config)
 - **失败兜底**:LLM 失败 → 返回空 `followup_questions` + 空 `unaskable_symptoms` → 路由跳诊断(信息已有 → 早结束总比误问强)
 
 - **设计要点**:
-  - **不再有"症状级追问"**:之前 ⑤ 设计的"基于 TF-IDF 抽症状 + 信息增益排序 + 可问性评估"对应的"问患者有没有 X 症状" 的封闭式追问形式已删 — 实测证明无监督算法抽不出真症状,LLM 直接选维度填空 + 开放式兜底是更朴素也更对的临床路径
-  - **unaskable 两段精筛**:⑤ 出粗筛(LLM 撒网式列出"想查的"),⑩ Step 3 基于诊断结果精筛(confirmed/insufficient 通常清空、need_exam 留关键鉴别项);代码侧不做语义判断,全交给两次 LLM 分工
+  - **不再有"症状级追问"**:之前 ④ 设计的"基于 TF-IDF 抽症状 + 信息增益排序 + 可问性评估"对应的"问患者有没有 X 症状" 的封闭式追问形式已删 — 实测证明无监督算法抽不出真症状,LLM 直接选维度填空 + 开放式兜底是更朴素也更对的临床路径
+  - **unaskable 两段精筛**:④ 出粗筛(LLM 撒网式列出"想查的"),⑩ Step 3 基于诊断结果精筛(confirmed/insufficient 通常清空、need_exam 留关键鉴别项);代码侧不做语义判断,全交给两次 LLM 分工
   - **不再调 reranked chunks / candidate_chunks**:LLM 凭 state 字段足够形成 prior 选追问 + 粗筛 unaskable;减少 prompt 长度
-  - **每轮 1 次 LLM 调用**:延迟 ~3-5s,前半段交互可接受;比原 ⑤ 的 4 处 LLM 调用总延迟更低
+  - **每轮 1 次 LLM 调用**:延迟 ~3-5s,前半段交互可接受;比原 ④ 的 4 处 LLM 调用总延迟更低
 
-##### ⑥ `generate_followup` + `wait_followup_answer` — 生成追问问题 + 等待回答
+##### ⑤+⑥ `generate_followup` + `wait_followup_answer` — 生成追问问题 + 等待回答
 
 > **拆分设计**：LLM 生成与 `interrupt` 等待分属两个节点。LangGraph `interrupt` 恢复时会重新执行整个节点，若 LLM 调用与 `interrupt` 在同一节点，恢复时会重复调用 LLM（浪费 token 且可能生成不同问题）。拆分后恢复时只重执行轻量的 `wait_followup_answer` 节点。
 
-**⑥a `generate_followup`**：
+**⑤ `generate_followup`**：
 - **输入**: `followup_questions`（list，可包含两种类型）、`confirmed_symptoms`、`denied_symptoms`、`chief_complaint`
 - **职责**:
   - `followup_questions` 现在可能同时包含两种类型的追问项：
@@ -2407,8 +2407,8 @@ result = graph.invoke(initial_state, config=config)
   - 例（纯症状）: `[{"term": "反酸", "type": "symptom"}, {"term": "胸骨后烧灼感", "type": "symptom"}, {"term": "胸闷", "type": "symptom"}]` → "您有没有反酸或烧心的感觉？另外想请问，您是否有胸口中间烧灼感或胸闷的情况？"
 - **输出**: 更新 `followup_question`
 
-**⑥b `wait_followup_answer`**：
-- **输入**: `followup_question`（由 ⑥a 写入 State）
+**⑥ `wait_followup_answer`**：
+- **输入**: `followup_question`（由 ⑤ 写入 State）
 - **职责**: 调用 `interrupt(state["followup_question"])` 暂停执行，等待用户回答
 - **输出**: 更新 `followup_answer`
 
@@ -2494,10 +2494,10 @@ result = graph.invoke(initial_state, config=config)
     - **患者叙事**:`chief_complaint`、`present_illness`(原文)
     - **结构化字段**:`present_illness_slots`(13 维 HPI)、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`medical_history`(摘要,见「病史分层接入机制」)、`report_findings`(`abnormal_values` 精确数值 + `impressions`/`positive_findings` 定性证据 + `negative_findings` 排除证据)
     - **检索证据**:Step 0.5 展开后的父块全文 + 同节图表(table HTML + figure 多模态截图)
-    - **粗筛 unaskable**:⑤ 写入的 `unaskable_symptoms`(`{description, reason}`),供 LLM 产 `retained_unaskable`
+    - **粗筛 unaskable**:④ 写入的 `unaskable_symptoms`(`{description, reason}`),供 LLM 产 `retained_unaskable`
   - **输出 `DiagnosisOutput`** (完整 schema 见 §9.5):
     - `results: list[RankedDisease]`:按 probability 降序的候选疾病,每项含 disease / probability / evidence(3-5 条) / differentiation(鉴别要点,可空) / differentiation_type
-    - `retained_unaskable: list[UnaskableSymptom]`:基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表(覆盖 ⑤ 粗筛 → 精筛)
+    - `retained_unaskable: list[UnaskableSymptom]`:基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表(覆盖 ④ 粗筛 → 精筛)
   - **`differentiation_type` 判定规则**(prompt 写死):
     - `confirmed`:top1 概率 ≥ 0.6 且证据闭环 → router 走 ⑪ safety_gate
     - `need_exam`:top1 概率 0.3-0.6,或多候选概率接近(差距 < 0.1)鉴别依赖检查体征 → router 走 ⑧ recommend_exam
@@ -2511,7 +2511,7 @@ result = graph.invoke(initial_state, config=config)
 
 - **输出**:
   - `diagnosis_result`(每项含 disease, probability, evidence, differentiation, `differentiation_type`: "confirmed" | "need_exam" | "insufficient", `failure_reason`)
-  - `unaskable_symptoms`(覆盖 ⑤ 粗筛 = LLM 输出的 `retained_unaskable`,⑧a recommend_exam 直接消费此精筛版)
+  - `unaskable_symptoms`(覆盖 ④ 粗筛 = LLM 输出的 `retained_unaskable`,⑧a recommend_exam 直接消费此精筛版)
 - **结构化输出保障（错误原因记录）**：1 步 LLM 通过 `llm.with_structured_output()` 约束输出,最多尝试 3 次(`stop_after_attempt=3`)。**仍失败 → 兜底产出**:
   ```python
   diagnosis_result = [{
@@ -2586,9 +2586,9 @@ graph TD;
     N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
     N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N5("⑤ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
-    N6("⑥a generate_followup<br/><i>生成追问问题</i>")
-    N6b("⑥b wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
+    N5("④ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
+    N6("⑤ generate_followup<br/><i>生成追问问题</i>")
+    N6b("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
     N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
     N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
@@ -2632,14 +2632,14 @@ def should_continue(state: MedicalState) -> str:
     """纯函数路由：仅返回下一节点名，不修改 State。
     上限命中后的 insufficient 兜底在 Node ⑩ `diagnose` 入口的 Step -1 完成（直读 followup_round）。"""
     # 硬性兜底：追问轮次达上限 → 强制进入诊断
-    # 正常情况下 Node ⑤ 的三重过滤（可问性/增益阈值/候选池耗尽）会在此之前收敛，
+    # 正常情况下 Node ④ 的三重过滤（可问性/增益阈值/候选池耗尽）会在此之前收敛，
     # 此处仅作为收敛机制异常时的止损保障
     if state["followup_round"] >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS:
         return "diagnose"
-    # followup_questions 由 Node ⑤ 产出,包含两类 type:
+    # followup_questions 由 Node ④ 产出,包含两类 type:
     #   - slot type:补全 HPI 13 维空槽(present_illness_slots 中缺失的维度)
     #   - open type:开放式问"还有别的不舒服吗"(兜底)
-    # ⑤ 内部 LLM 判定信息已足时返回空列表 → 跳诊断
+    # ④ 内部 LLM 判定信息已足时返回空列表 → 跳诊断
     # 此处只需检查 followup_questions 是否非空
     if state["followup_questions"]:
         return "followup"           # 有待追问项(slot 或 open)→ 继续追问
@@ -2791,15 +2791,15 @@ def wait_exam_report(state: MedicalState) -> dict:
 
 ##### 4.1.6.1 信息增益机制 — 已移除
 
-原 ⑤ select_symptom 采用"症状在 candidate_chunks 中出现频率 p → 二元熵 H = -p·log₂(p)-(1-p)·log₂(1-p)"作为追问候选排序依据。该机制已整体废弃,理由:
+原 ④ select_symptom 采用"症状在 candidate_chunks 中出现频率 p → 二元熵 H = -p·log₂(p)-(1-p)·log₂(1-p)"作为追问候选排序依据。该机制已整体废弃,理由:
 
 - **数据基础不立**:实测 TF-IDF 抽出来的 94% 是"治疗/细胞/病人"通用词,真鉴别症状词稀疏 → 信息增益要的"症状 → chunk 集合"倒排表 ≥2 共享 key 只有 9 个,且 7/9 是诊断词不是症状(见 EL_DESIGN_REVIEW §11)
 - **目标函数错**:二元熵优化"等概率拆分候选池的症状",前提是把所有候选病当等概率;但医生临床思路是"鉴别 top 1 vs top 2 候选病的特异性症状"(hypothesis-driven),两者差异是目标不同而非工程精度问题
-- **替代方案**:⑤ 重设计为 1 次 LLM 调用,LLM 凭医学知识直接挑 patient-askable 维度(HPI 13 维 slot 填空)+ open 兜底问。无信息增益,无阈值兜底
+- **替代方案**:④ 重设计为 1 次 LLM 调用,LLM 凭医学知识直接挑 patient-askable 维度(HPI 13 维 slot 填空)+ open 兜底问。无信息增益,无阈值兜底
 
 ##### 4.1.6.2 Entity Linking — 已移除
 
-原三层归一化(Tier 1 alias / Tier 2 向量阈值 / Tier 3 占位)整段拆除。运行时不再查 `terms_collection`、不再有 `preferred_term` / `concept_id` 归一化产物;`confirmed_symptoms` / `denied_symptoms` 字段统一存 raw text,下游 ⑤ select_symptom 的"已问去重 / 报告证据消费"由 LLM 一次语义比对承担(详见 §4.1.2 ⑤)。
+原三层归一化(Tier 1 alias / Tier 2 向量阈值 / Tier 3 占位)整段拆除。运行时不再查 `terms_collection`、不再有 `preferred_term` / `concept_id` 归一化产物;`confirmed_symptoms` / `denied_symptoms` 字段统一存 raw text,下游 ④ select_symptom 的"已问去重 / 报告证据消费"由 LLM 一次语义比对承担(详见 §4.1.2 ④)。
 
 **为什么移除**:EL_DESIGN_REVIEW §11 实测发现 ICD-10 alias 表对中文症状词覆盖率拉胯(case 症状词 50% Tier 3 占位,KB chunk 94% Tier 3),且 4 万条 alias 对 LLM 内化的医学同义词知识来说是噪音而非补充;运行时 LLM 在线判断("肚子疼=腹痛"、"低热⊂发热")反而比向量阈值精确。
 
@@ -2837,13 +2837,13 @@ Agent 工作流中不同节点对上下文的需求不同。每个节点在调�
 | `info_collect` ① | `patient_id`、`patient_input` | 是（Step 1 LLM 提取主诉+现病史+结构化槽位）；Step 2-3 纯 DB 查询 | Step 1: LLM 从 `patient_input` 提取 `chief_complaint` + `present_illness` + `present_illness_slots`（13 维度同步填充）；Step 2: 以 `patient_id` 查 PostgreSQL 加载 `medical_history`；Step 3: 加载 `exam_reports` |
 | `build_query` ② | `chief_complaint`、`present_illness`(首轮)/ `followup_answer`(追问轮)/ 新检查结果文本、`confirmed_symptoms`、`denied_symptoms`、`medical_history`、`report_findings`(`positive_findings` / `impressions` 进 query 的 dense 路与 sparse 路;`abnormal_values` 原始数值、`negative_findings`、`denied_symptoms` 均不进 query)、`present_illness_slots`(已填充的维度信息纳入 Dense query 与 Sparse 多字段直采) | 是 | 首轮对主诉+现病史做 NER 直出 raw text 进 `confirmed_symptoms` / `denied_symptoms`(EL 已移除,无归一化);`confirmed_symptoms` + `present_illness_slots` 已填维度构建 `dense_query`;`sparse_queries` 由 state 多字段直采(chief_complaint + 13 维 slots + `positive_findings`/`impressions` 每条独立词袋,阴性 impression 过滤)合并而成;`denied_symptoms` 仅用于 NER 去重上下文,不参与 query 构建 |
 | `retrieve` ③ | `dense_query`、`sparse_queries` | 否（纯检索） | `dense_query: "外伤后中间清醒期意识恶化伴瞳孔不等大及锥体束征"` + `sparse_queries: ["恶心", "呕吐", "右侧瞳孔散大", "左侧Babinski征阳性", "右额颞线形骨折"]` → Dense ANN + N×BM25 → RRF 融合 |
-| ~~`extract_symptoms` ④~~ | — | — | **节点已删除**(TF-IDF 抽症状对患者追问无价值,见 §4.1.2 ④);⑤ 直接从 state 出追问 |
-| `select_discriminative_symptom` ⑤ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms` | 是(1 LLM:SmartFollowupOutput) | LLM 一次输入 state → 同时出 questions(≤5 条追问,`type` ∈ `{"slot","open"}`) + unaskable_symptoms(≤5 条想知道但患者答不上的体征粗筛,`{description, reason}`);后续 ⑩ Step 3 输出 retained_unaskable 覆盖粗筛 → 精筛供 ⑧a 消费 |
-| `generate_followup` ⑥ | `followup_questions`(含 `type: "slot"/"open"` 标记)、`confirmed_symptoms`、`denied_symptoms`、`chief_complaint` | 是 | 混合 type 输入 → 生成流畅追问;如 slot `{"slot": "trigger"}` + open `{}` → `"您这次腹痛是什么情况下开始的?除此之外还有别的地方不舒服吗?"` |
+| ~~`extract_symptoms` ④~~ | — | — | **节点已删除**(TF-IDF 抽症状对患者追问无价值,见 §4.1.2 ④);④ 直接从 state 出追问 |
+| `select_discriminative_symptom` ④ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms` | 是(1 LLM:SmartFollowupOutput) | LLM 一次输入 state → 同时出 questions(≤5 条追问,`type` ∈ `{"slot","open"}`) + unaskable_symptoms(≤5 条想知道但患者答不上的体征粗筛,`{description, reason}`);后续 ⑩ Step 3 输出 retained_unaskable 覆盖粗筛 → 精筛供 ⑧a 消费 |
+| `generate_followup` ⑤ | `followup_questions`(含 `type: "slot"/"open"` 标记)、`confirmed_symptoms`、`denied_symptoms`、`chief_complaint` | 是 | 混合 type 输入 → 生成流畅追问;如 slot `{"slot": "trigger"}` + open `{}` → `"您这次腹痛是什么情况下开始的?除此之外还有别的地方不舒服吗?"` |
 | `process_followup_answer` ⑦ | `followup_question`、`followup_answer`、`followup_questions`（含类型标记）、`confirmed_symptoms`、`denied_symptoms`、`present_illness_slots`（维度回填目标）、`present_illness`（维度回答追加目标） | 是 | 症状级：`followup_answer: "有的"` → 确认症状；维度级：`followup_answer: "吃完饭后疼得厉害"` → 回填 `present_illness_slots["aggravating"]` + 追加 `present_illness` |
 | `recommend_exam` ⑧a | `candidate_chunks`、`confirmed_symptoms`、`denied_symptoms`、`exam_reports`、`exam_round`、`diagnosis_result`、`report_findings` | 是 | 基于 `diagnosis_result` 候选疾病及鉴别类型 + `candidate_chunks` 文献参考推荐检查;已有 `exam_reports` + `report_findings` 用于去重和复用评估 |
 | `process_exam_result` ⑨ | 用户上传的检查结果文本 | 是 | 多模态 LLM 直读报告，提取结构化发现追加到 `exam_reports` 和 `report_findings` |
-| `diagnose` ⑩ | `candidate_chunks`、`chief_complaint`（主诉原文）、`present_illness`（现病史原文）、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`present_illness_slots`（结构化现病史维度）、`medical_history`（预处理为诊断相关摘要）、`report_findings`（`abnormal_values` 精确数值 + `impressions`/`positive_findings` 定性支持证据 + `negative_findings` 排除证据）、`unaskable_symptoms`（⑤ 粗筛） | 是（**1 步 LLM**，原生多模态模型 DashScope qwen3.5-plus） | 1 步 LLM 同时出 `DiagnosisOutput` = `results`（按 probability 降序的候选,含 disease/probability/evidence/differentiation/differentiation_type）+ `retained_unaskable`（覆盖 ⑤ 粗筛供 ⑧a 消费）;对齐 RAG 评测口径 `.eval/rag_eval/run_diagnose_eval.py`，3 步链已废弃 |
+| `diagnose` ⑩ | `candidate_chunks`、`chief_complaint`（主诉原文）、`present_illness`（现病史原文）、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`present_illness_slots`（结构化现病史维度）、`medical_history`（预处理为诊断相关摘要）、`report_findings`（`abnormal_values` 精确数值 + `impressions`/`positive_findings` 定性支持证据 + `negative_findings` 排除证据）、`unaskable_symptoms`（④ 粗筛） | 是（**1 步 LLM**，原生多模态模型 DashScope qwen3.5-plus） | 1 步 LLM 同时出 `DiagnosisOutput` = `results`（按 probability 降序的候选,含 disease/probability/evidence/differentiation/differentiation_type）+ `retained_unaskable`（覆盖 ④ 粗筛供 ⑧a 消费）;对齐 RAG 评测口径 `.eval/rag_eval/run_diagnose_eval.py`，3 步链已废弃 |
 | `safety_gate` ⑪ | `diagnosis_result`、`medical_history`（过敏史/用药史/妊娠状态） | 是（LLM 兜底） | 规则层匹配 `allergy_history: ["青霉素"]` → 禁用阿莫西林；LLM 判断交叉过敏风险 |
 | `generate_advice` ⑫ | `diagnosis_result`、`safety_constraints`、`medical_history`、`exam_reports`、`exam_round` | 是 | 在 `safety_constraints.banned_drugs` 约束内生成用药建议 |
 | `format_response` ⑬ | `chief_complaint`、`diagnosis_result`、`recommended_tests`、`medication_advice`、`risk_warnings` | 是 | 组织面向患者的自然语言回复，引用主诉原文使回复更人性化 |
@@ -2886,14 +2886,14 @@ def diagnose(state: MedicalState) -> dict:
         slots=slots,
         history_summary=history_summary,
         report_findings=findings,
-        unaskable_symptoms=unaskable,    # ⑤ 粗筛,LLM 用来产 retained_unaskable
+        unaskable_symptoms=unaskable,    # ④ 粗筛,LLM 用来产 retained_unaskable
     )
     chain = vision_llm.with_structured_output(DiagnosisOutput).with_retry(stop_after_attempt=3)
     result = chain.invoke(messages)  # 生产实现需套 try/except + 指标埋点
 
     return {
         "diagnosis_result": [r.model_dump() for r in result.results],
-        # retained_unaskable 覆盖 ⑤ 写的粗筛版 → 精筛供 ⑧a recommend_exam 消费
+        # retained_unaskable 覆盖 ④ 写的粗筛版 → 精筛供 ⑧a recommend_exam 消费
         "unaskable_symptoms": [u.model_dump() for u in result.retained_unaskable],
     }
 ```
@@ -2984,21 +2984,21 @@ graph = StateGraph(MedicalState)
 | `messages` | `Annotated[list[BaseMessage], add_messages]` | LangGraph `add_messages` reducer 自动合并；任何节点不得从 `messages` 组装 prompt（见 4.1.1） | 完整消息历史，仅供 Checkpointer 持久化与审计追溯 |
 | `chief_complaint` | `str` | `info_collect` ① | 主诉（主要症状+持续时间），LLM 从 `patient_input` 提取 |
 | `present_illness` | `str` | `info_collect` ①、`process_followup_answer` ⑦（维度追问回答追加） | 现病史（本次发病详细展开），LLM 从 `patient_input` 提取，维度追问回答后追加更新 |
-| `present_illness_slots` | `dict` | `info_collect` ①（首次填充）、`process_followup_answer` ⑦（维度回填） | 现病史结构化要素槽位（13 个维度：onset_time/onset_mode/trigger/location/nature/severity/duration_pattern/aggravating/relieving/associated_symptoms/progression/treatment_tried/treatment_response）；空槽驱动 ⑤ 维度缺口追问 |
+| `present_illness_slots` | `dict` | `info_collect` ①（首次填充）、`process_followup_answer` ⑦（维度回填） | 现病史结构化要素槽位（13 个维度：onset_time/onset_mode/trigger/location/nature/severity/duration_pattern/aggravating/relieving/associated_symptoms/progression/treatment_tried/treatment_response）；空槽驱动 ④ 维度缺口追问 |
 | `medical_history` | `dict` | `info_collect` ① | 历史病史档案（从 DB 加载，不含主诉和现病史） |
 | `exam_reports` | `list[dict]` | `info_collect` ①、`process_exam_result` ⑨ | 检查报告文件引用列表（`{"file_ref": str}`），不存 base64；需要时由 ①.5 / ⑨ 按需加载 |
 | `report_findings` | `list[dict]` | `analyze_initial_reports` ①.5、`process_exam_result` ⑨ | 从报告中提取的结构化关键发现（异常值/印象/阳性/阴性，报告本身已是标准术语） |
 | `dense_query` | `str` | `build_query` ② | Dense 路检索 query:LLM 将确认症状+病史改写成的语义连贯自然语言句子 |
 | `sparse_queries` | `list[str]` | `build_query` ② | Sparse 路检索 queries:state 多字段直采(`chief_complaint` + `present_illness_slots` 6 单值字段 + 3 list 字段 + `report_findings.positive_findings`/`impressions` 每条独立词袋,阴性 impression 过滤;去重 + 长度 ≥ 2 过滤);每条一次 BM25,RRF 加权融合(`dense_weight = max(1, N_sparse/RRF_DENSE_WEIGHT_FACTOR)`;见 §3.2.1 Step 2 / §3.2.2) |
 | `candidate_chunks` | `list[dict]` | `retrieve` ③ | 候选 chunk 池(每轮覆盖写入,保留 RRF 融合分数) |
-| `confirmed_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ⑤(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认有的症状,EL 移除后为 raw text(来源:主诉 NER、报告阳性发现、追问确认) |
-| `denied_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ⑤(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认没有的症状,EL 移除后为 raw text(来源:主诉 NER 否定项、报告阴性发现、追问否认) |
+| `confirmed_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ④(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认有的症状,EL 移除后为 raw text(来源:主诉 NER、报告阳性发现、追问确认) |
+| `denied_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ④(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认没有的症状,EL 移除后为 raw text(来源:主诉 NER 否定项、报告阴性发现、追问否认) |
 | `uncertain_symptoms` | `list[str]` | `process_followup_answer` ⑦ | 用户明确表示不知道/不确定的症状,raw text;已问过不再重问 |
-| `followup_questions` | `list[dict]` | `select_discriminative_symptom` ⑤ | 本轮待追问列表（最多 MAX_FOLLOWUP_QUESTIONS=5 项），支持两种类型：症状级 `{"term": str, "type": "symptom"}` + 维度级 `{"slot": str, "type": "dimension"}`；维度通过配额制占 1~2 席（空槽填满后退化为纯症状）；为空则路由到诊断 |
-| `unaskable_symptoms` | `list[dict]` | ⑤ 写粗筛版 → ⑩ 1 步 LLM 输出 `retained_unaskable` 覆盖为精筛版 | LLM 想知道但患者答不上的体征/指标(`{"description": str, "reason": str}`)。⑤ 出粗筛喂 ⑩ 判 need_exam;⑩ 基于诊断结果挑出"仍需检查确认的"精筛覆盖此字段;⑧a `recommend_exam` 直接消费精筛版 |
+| `followup_questions` | `list[dict]` | `select_discriminative_symptom` ④ | 本轮待追问列表（最多 MAX_FOLLOWUP_QUESTIONS=5 项），支持两种类型：症状级 `{"term": str, "type": "symptom"}` + 维度级 `{"slot": str, "type": "dimension"}`；维度通过配额制占 1~2 席（空槽填满后退化为纯症状）；为空则路由到诊断 |
+| `unaskable_symptoms` | `list[dict]` | ④ 写粗筛版 → ⑩ 1 步 LLM 输出 `retained_unaskable` 覆盖为精筛版 | LLM 想知道但患者答不上的体征/指标(`{"description": str, "reason": str}`)。④ 出粗筛喂 ⑩ 判 need_exam;⑩ 基于诊断结果挑出"仍需检查确认的"精筛覆盖此字段;⑧a `recommend_exam` 直接消费精筛版 |
 | `followup_round` | `int` | `process_followup_answer` ⑦ | 已完成的追问轮次，每轮 +1；`should_continue` 路由在 ≥ MAX_FOLLOWUP_ROUNDS 时送往 diagnose；Node ⑩ Step -1 直读该字段判断是否走 insufficient 兜底（无需额外 capped 旗标字段） |
-| `followup_question` | `str` | `generate_followup` ⑥ | 当前生成的追问问题文本 |
-| `followup_answer` | `str` | `wait_followup_answer` ⑥b（interrupt 恢复写入） | 用户对追问的回答 |
+| `followup_question` | `str` | `generate_followup` ⑤ | 当前生成的追问问题文本 |
+| `followup_answer` | `str` | `wait_followup_answer` ⑥（interrupt 恢复写入） | 用户对追问的回答 |
 | `exam_round` | `int` | `recommend_exam` ⑧a | 已建议检查的轮次，每轮 +1；≥ MAX_EXAM_ROUNDS 时强制进入诊断 |
 | `pending_exam_results` | `list` | `wait_exam_report` ⑧b | interrupt 返回的用户回传检查结果；`process_exam_result` ⑨ 消费后解析入 `exam_reports` / `report_findings` |
 | `last_nlu_round` | `int` | `build_query` ② | NER 游标，初始 0；每次 NER 完成后置为 `followup_round`；检查路径（N9→N2）进入时两值相等，跳过重复 NER |
@@ -3541,7 +3541,7 @@ query 类型应覆盖：症状咨询、药物查询、检查解读、疾病科�
 ### 6.2.1 测试方法
 
 - **构建 Agent 专属测试集**：在数据集中预置好"检索结果"（mock `candidate_chunks`），不走真实 RAG，让 Agent 直接基于固定上下文做决策
-- **评估 Agent 的节点调用链**：对比实际执行路径 vs 预期路径（如 ①→①.5→②→③→④→⑤→⑥→⑦→④→⑤→⑩→⑪→⑫→⑬）
+- **评估 Agent 的节点调用链**：对比实际执行路径 vs 预期路径（如 ①→①.5→②→③→④→⑤→⑥→⑦→②→④→⑩→⑪→⑫→⑬）
 - **注入异常场景**：故意给 Agent 返回错误/空的工具结果，测试其容错和重规划能力
 - **LLM Judge 聚焦决策质量**：Judge 专门评估"Agent 的推理过程是否合理"，而不只是最终答案对不对
 
@@ -3550,7 +3550,7 @@ query 类型应覆盖：症状咨询、药物查询、检查解读、疾病科�
 | 评估维度 | 计算方式 | 说明 |
 |---|---|---|
 | ~~症状提取准确率~~ | — | **已废**:④ extract_symptoms 节点已删,此指标无意义 |
-| **追问决策合理性** | LLM Judge 从是否 patient-answerable / 是否填补 HPI 缺口 / 是否真有诊断价值三维度打分(各 1-5 分),取加权均分 | select_symptom ⑤ 选择的追问项是否合理(slot 类是否选了诊断价值高的 13 维 / open 类是否在合理时机使用) |
+| **追问决策合理性** | LLM Judge 从是否 patient-answerable / 是否填补 HPI 缺口 / 是否真有诊断价值三维度打分(各 1-5 分),取加权均分 | select_symptom ④ 选择的追问项是否合理(slot 类是否选了诊断价值高的 13 维 / open 类是否在合理时机使用) |
 | **收敛判断能力** | 对比实际追问轮数与标注的最优轮数，计算偏差率；同时统计过早收敛率和过晚收敛率 | should_continue 路由是否在合适的时机停止追问、进入诊断 |
 | **诊断推理质量** | Top-1 / Top-3 命中率（诊断结果是否包含标注疾病）；LLM Judge 对证据链完整性打分（1-5 分） | diagnose ⑩ 输出的疾病排名、概率、证据链是否合理 |
 | **安全约束遵从度** | 二分类指标：对含禁忌场景的 case 统计拦截成功率（Recall）和误拦率（FPR） | safety_gate ⑪ 是否正确拦截禁忌药物、标记高风险交互 |
@@ -3687,11 +3687,11 @@ flowchart TD
 | `build_exam_report_reading_prompt` | ①⑨ | 多模态理解检验单/影像报告（文字+图像+PDF），返回结构化摘要 |
 | `build_ner_prompt` | ② | 从新增文本中抽取医疗实体（症状/疾病/药物/解剖），含否定标记与时序 |
 | `build_query_construction_prompt` | ② | 基于标准化实体构造 Dense / Sparse 双路查询 |
-| `build_smart_followup_prompt` | ⑤ | 1 LLM 直接选追问 — 输入 state(主诉 + 13 维 slots 空缺 + 已问症状),输出 `questions: list[FollowupQuestion]`(slot 维度填补 / open 兜底问) |
-| `build_followup_question_prompt` | ⑥a | 将两种 type 追问项(slot 维度填补 + open 开放式)转化为患者可理解的流畅追问句式 |
+| `build_smart_followup_prompt` | ④ | 1 LLM 直接选追问 — 输入 state(主诉 + 13 维 slots 空缺 + 已问症状),输出 `questions: list[FollowupQuestion]`(slot 维度填补 / open 兜底问) |
+| `build_followup_question_prompt` | ⑤ | 将两种 type 追问项(slot 维度填补 + open 开放式)转化为患者可理解的流畅追问句式 |
 | `build_followup_parse_prompt` | ⑦ | 解析患者追问回答:slot 类 → 回填 `present_illness_slots` + 追加 `present_illness`;open 类 → 提取新症状到 `new_symptoms`(由 ⑦ append 到 confirmed_symptoms) |
 | `build_exam_recommendation_prompt` | ⑧ | 根据待鉴别症状推断所需检查（体格检查+辅助检查），输出优先级与鉴别理由 |
-| `build_diagnose_prompt` | ⑩ 1 步 LLM | 诊断推理：全量患者画像(主诉+现病史+slots+symptoms+history+reports)+ 文献(20 父块 + figure 多模态)+ ⑤ unaskable 粗筛 → 一次 LLM 出 `DiagnosisOutput`(results + retained_unaskable);对齐 RAG 评测 `.eval/rag_eval/run_diagnose_eval.py` 口径,3 步链已废弃 |
+| `build_diagnose_prompt` | ⑩ 1 步 LLM | 诊断推理：全量患者画像(主诉+现病史+slots+symptoms+history+reports)+ 文献(20 父块 + figure 多模态)+ ④ unaskable 粗筛 → 一次 LLM 出 `DiagnosisOutput`(results + retained_unaskable);对齐 RAG 评测 `.eval/rag_eval/run_diagnose_eval.py` 口径,3 步链已废弃 |
 | `build_safety_gate_prompt` | ⑪ | 规则层无法覆盖时的 LLM 兜底：交叉过敏风险、罕见药物相互作用、肝肾功能剂量调整 |
 | `build_advice_prompt` | ⑫ | 在安全约束范围内生成用药建议 / 检查建议 / 风险提示，高风险路径（疑似心梗/卒中）优先输出急诊提示 |
 | `build_format_response_prompt` | ⑬ | 将结构化诊断与建议整理为自然语言，附加免责声明 |
@@ -3728,7 +3728,7 @@ flowchart TD
 严格对齐本 DEV_SPEC 的架构分层与 1.3.1 节目录结构。
 
 1. **只按本文档设计落地**：以 1.3.1 节目录树为"交付清单"，每一步都要在文件系统上产生可见变化。
-2. **先打通主闭环，再逐层增强**：优先做"可跑通的端到端路径（Ingestion → Retrieval → Agent 最小诊断链路 ①→①.5→②→③→④→⑤→⑩→⑪→⑫→⑬）"，再接入追问循环（⑥⑦）和检查循环（⑧⑨）。
+2. **先打通主闭环，再逐层增强**：优先做"可跑通的端到端路径（Ingestion → Retrieval → Agent 最小诊断链路 ①→①.5→②→③→④→⑩→⑪→⑫→⑬）"，再接入追问循环（⑤⑥⑦）和检查循环（⑧⑨）。
 3. **外部依赖可替换/可 Mock**：LLM（Qwen）/ Embedding（Qwen3-Embedding-8B）/ Reranker / Milvus / PostgreSQL 的真实调用在单元测试中一律用 Fake/Mock，集成测试再开真实后端。
 4. **每个小阶段给出验收标准**：明确"完成"的定义，避免模糊交付。
 5. **基础设施按需引入**：Docker Compose 在阶段 A 搭建基座，监控/缓存等在主链路跑通后再逐步接入。
@@ -3830,7 +3830,7 @@ flowchart TD
 
 ### 阶段 F：Agent 工作流（LangGraph StateGraph）
 
-**目的**：按 4.1 节设计，使用 LangGraph StateGraph 实现完整诊断工作流（15 节点 + 2 条件路由）。先落地最小可用路径（① → ①.5 → ② → ③ → ④ → ⑤ → ⑩ → ⑪ → ⑫ → ⑬），再接入追问循环（⑥a→⑥b→⑦）和检查循环（⑧a→⑧b→⑨）。
+**目的**：按 4.1 节设计，使用 LangGraph StateGraph 实现完整诊断工作流（15 节点 + 2 条件路由）。先落地最小可用路径（① → ①.5 → ② → ③ → ④ → ⑩ → ⑪ → ⑫ → ⑬），再接入追问循环（⑤→⑥→⑦）和检查循环（⑧a→⑧b→⑨）。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
@@ -3840,15 +3840,15 @@ flowchart TD
 | F3 | 节点 ②:build_query(EL 移除后整段重写) | `src/agent/nodes/build_query.py`、`src/agent/schemas/ner.py`(`NEREntity` / `NERResult`)、`src/agent/schemas/query_construction.py`(`QueryConstructionOutput`),Schema 定义均与 §9.5 一致 | 三步流程:Step 1 LLM NER 实体抽取(首轮对 `chief_complaint` + `present_illness`;后续轮仅对本轮新增 `followup_answer`);首轮把 symptom 类(temporality=current)按 negation 分流直接以 raw text 写 `confirmed_symptoms` / `denied_symptoms`(EL 删除后不再归一化)→ Step 2 `sparse_queries` 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造:来源 A `chief_complaint` + 13 维 slots;来源 B `report_findings.positive_findings` 全加 + `impressions` 阴性过滤;去重 + 长度 ≥ 2)→ Step 3 `dense_query` 构建/改写(LLM 整合 confirmed + 已填维度 + 报告 positive/impressions 改写成一句自然语言);单元测试(Mock LLM) |
 | F4 | 节点 ③：retrieve | `src/agent/nodes/retrieve.py` | 用改写后的 query 对 Milvus 做混合检索（Dense + Sparse 双路 → RRF 融合 → Top-N 截断），覆盖写入 `candidate_chunks`；单元测试 |
 | F5 | 节点 ④:extract_symptoms(EL 移除后简化) | `src/agent/nodes/extract_symptoms.py` | 纯 TF-IDF 关键词提取,零 LLM,零 terms_collection 调用;输出每项 `{"text": kw, "preferred_term": None, "linked": False}`(后两字段保留兼容下游字段访问);单元测试 |
-| F6 | 节点 ⑤:select_discriminative_symptom(1 LLM 重设计) | `src/agent/nodes/select_symptom.py`、`src/agent/schemas/symptom_selection.py`(`FollowupQuestion` / `UnaskableSymptom` / `SmartFollowupOutput`,定义与 §9.5 一致) | 1 次 LLM 调用同时出两件事:① `followup_questions`(slot 维度补全 + open 开放式追问,≤ MAX_FOLLOWUP_QUESTIONS,可为 0);② `unaskable_symptoms` 粗筛(LLM 想知道但患者答不上的体征,`{description, reason}`)。失败兜底:LLM 失败 → 返空 → 路由跳诊断。原"维度配额 + TF-IDF 信息增益 + 可问性评估"四步重工程化方案整体废弃 — 实测 TF-IDF 抽出 94% 教材通用高频词,信息增益的可比 key 立不起来。**所有阈值/上限常量来源见 §9.7,禁止 hardcode**;单元测试:slot+open 混合 / 信息已足返空 / unaskable 转储 |
-| F7 | 条件路由：should_continue | `src/agent/routers/should_continue.py` | **纯函数路由**（不修改 State）：优先级：`followup_round >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS`（常量来源 §9.7）→ 返回 diagnose（硬性兜底，防收敛失效无限循环；兜底 insufficient 产出由 Node ⑩ Step -1 完成）；`followup_questions` 非空 → followup；否则 → diagnose；所有自然收敛过滤逻辑（可问性、增益阈值）已内聚在 Node ⑤；单元测试覆盖三分支 + 验证路由函数调用前后 State 字段未被修改 |
-| F8 | 节点 ⑥⑦：追问循环 | `src/agent/nodes/generate_followup.py`、`wait_followup_answer.py`、`process_followup.py`、`src/agent/schemas/followup.py`（`FollowupParseResult`，定义与 §9.5 一致） | ⑥a LLM 将混合类型追问项（维度级 `type: "dimension"` + 症状级 `type: "symptom"`）转为患者可理解的流畅追问，写入 `followup_question`；⑥b `wait_followup_answer` 调用 interrupt() 等待用户回答（与 LLM 调用分离，避免恢复时重复生成）；⑦ LLM 解析回答：症状级 → 确认/否认/不确定三类分流更新 confirmed_symptoms / denied_symptoms / uncertain_symptoms；维度级 → 回填 `present_illness_slots` 对应槽位 + 追加 `present_illness` 自由文本；同时提取新增症状信息 → followup_round += 1 → 回到 build_query；Prompt 来自 `src/prompts/agent.py`；单元测试 |
+| F6 | 节点 ④:select_discriminative_symptom(1 LLM 重设计) | `src/agent/nodes/select_symptom.py`、`src/agent/schemas/symptom_selection.py`(`FollowupQuestion` / `UnaskableSymptom` / `SmartFollowupOutput`,定义与 §9.5 一致) | 1 次 LLM 调用同时出两件事:① `followup_questions`(slot 维度补全 + open 开放式追问,≤ MAX_FOLLOWUP_QUESTIONS,可为 0);② `unaskable_symptoms` 粗筛(LLM 想知道但患者答不上的体征,`{description, reason}`)。失败兜底:LLM 失败 → 返空 → 路由跳诊断。原"维度配额 + TF-IDF 信息增益 + 可问性评估"四步重工程化方案整体废弃 — 实测 TF-IDF 抽出 94% 教材通用高频词,信息增益的可比 key 立不起来。**所有阈值/上限常量来源见 §9.7,禁止 hardcode**;单元测试:slot+open 混合 / 信息已足返空 / unaskable 转储 |
+| F7 | 条件路由：should_continue | `src/agent/routers/should_continue.py` | **纯函数路由**（不修改 State）：优先级：`followup_round >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS`（常量来源 §9.7）→ 返回 diagnose（硬性兜底，防收敛失效无限循环；兜底 insufficient 产出由 Node ⑩ Step -1 完成）；`followup_questions` 非空 → followup；否则 → diagnose；所有自然收敛过滤逻辑（可问性、增益阈值）已内聚在 Node ④；单元测试覆盖三分支 + 验证路由函数调用前后 State 字段未被修改 |
+| F8 | 节点 ⑤⑥⑦:追问循环 | `src/agent/nodes/generate_followup.py`、`wait_followup_answer.py`、`process_followup.py`、`src/agent/schemas/followup.py`（`FollowupParseResult`，定义与 §9.5 一致） | ⑤ LLM 将混合类型追问项（维度级 `type: "dimension"` + 症状级 `type: "symptom"`）转为患者可理解的流畅追问，写入 `followup_question`；⑥ `wait_followup_answer` 调用 interrupt() 等待用户回答（与 LLM 调用分离，避免恢复时重复生成）；⑦ LLM 解析回答：症状级 → 确认/否认/不确定三类分流更新 confirmed_symptoms / denied_symptoms / uncertain_symptoms；维度级 → 回填 `present_illness_slots` 对应槽位 + 追加 `present_illness` 自由文本；同时提取新增症状信息 → followup_round += 1 → 回到 build_query；Prompt 来自 `src/prompts/agent.py`；单元测试 |
 | F9 | 节点 ⑧⑨：检查循环 | `src/agent/nodes/recommend_exam.py`、`wait_exam_report.py`、`process_exam_result.py` | ⑧a LLM 根据候选疾病推断所需检查（体格检查 + 辅助检查），按优先级排序；对与 report_findings 有交集的检查项，LLM 额外输出复用评估说明（含报告日期、采集条件判断），不静默删除，写入 `recommended_tests`；⑧b `wait_exam_report` 调用 interrupt() 等待结果回传（与 LLM 调用分离，避免恢复时重复生成）；⑨ 调用 report_parser.py 共享解析函数（与 ①.5 复用）→ 追加到 exam_reports 和 report_findings → 回到 build_query；`exam_round += 1`，上限 `settings.agent_limits.MAX_EXAM_ROUNDS`（常量来源 §9.7，禁止 hardcode）；单元测试 |
 | F10 | 节点 ⑩：diagnose | `src/agent/nodes/diagnose.py`、`src/agent/schemas/diagnosis.py`（`RankedDisease` / `DiagnosisOutput`，定义与 §9.5 一致） | **Step -1 兜底短路**：入口直读 `state["followup_round"] >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS`（常量来源 §9.7）时跳过 LLM，直接产出 insufficient 结果且 `failure_reason="followup_round_capped"`；正常路径：Step 0 Cross-Encoder 前置截断（可插拔，3.2.3）→ Step 0.5 父块扩展 + 同节图表 → **Step 1 1 步 LLM 诊断推理**(原生多模态 qwen3.5-plus,全量患者画像 + 文献 + figure 多模态喂入,直接出 `DiagnosisOutput` = results + retained_unaskable);**兜底 + 错误原因记录**:LLM 最多尝试 3 次仍失败 → try/except 捕获后返回 insufficient 结果,`failure_reason="step_1_structured_output_failed: <ExcType>: <msg>"`;同时 `logger.error(..., exc_info=True)` 记录完整堆栈;输出 diagnosis_result(含 disease / probability / evidence / differentiation / differentiation_type / failure_reason) + 覆盖 unaskable_symptoms(精筛供 ⑧a 消费);Prompt 来自 `src/prompts/agent.py:build_diagnose_prompt`(对齐 RAG 评测口径,3 步链已废弃);**单元测试覆盖 4 条路径**:① followup_round 触顶 → `failure_reason == "followup_round_capped"` ② 正常 1 步成功 → `failure_reason is None` + retained_unaskable 写回 ③ LLM 失败 → `failure_reason.startswith("step_1_structured_output_failed")` ④ vision LLM 路由验证(`settings.llm.VISION_*`);③ 断言 `differentiation_type == "insufficient"` 且 `probability == 0.0` 且 downstream 节点(⑪⑫⑬)仍能正常运行 |
 | F11 | 条件路由：diagnose_router | `src/agent/routers/diagnose_router.py` | `need_exam` 且 `exam_round < settings.agent_limits.MAX_EXAM_ROUNDS` → recommend_exam；`confirmed` / `insufficient` / `exam_round >= settings.agent_limits.MAX_EXAM_ROUNDS` → safety_gate（常量来源 §9.7，禁止 hardcode）；单元测试 |
 | F12 | 节点 ⑪：safety_gate | `src/agent/nodes/safety_gate.py`、`src/agent/schemas/safety_gate.py`（`SafetyGateOutput`，定义与 §9.5 一致） | 规则过滤：从 medical_history 提取过敏药物/当前用药/妊娠状态 → 匹配药物-过敏对（含同类药排除）+ 配伍禁忌表 + FDA 妊娠分级（D/X 禁用）；LLM 兜底：交叉过敏、罕见药物相互作用、肝肾功能剂量调整；输出 safety_constraints（banned_drugs / interaction_warnings / contraindication_flags）；单元测试 |
 | F13 | 节点 ⑫⑬：建议与输出 | `src/agent/nodes/generate_advice.py`、`format_response.py`、`src/agent/schemas/advice.py`（`AdviceOutput`，定义与 §9.5 一致） | ⑫ 在 safety_constraints 约束内：confirmed → 用药建议 + 注意事项 + 复查建议；insufficient → 线下检查建议；need_exam 达上限 → 诚实告知局限；**读取 `diagnosis_result[0].failure_reason`**：`"followup_round_capped"` → risk_warnings 追加"问诊轮次较多仍未收敛"提示；`"step_N_structured_output_failed..."` → risk_warnings 追加"系统分析出现技术问题，结果不可作为依据"提示（不暴露异常细节）；高危提示优先级最高；⑬ LLM 组织自然语言回复 + 免责声明，failure_reason 非 None 时免责声明补一句"本次诊断因系统原因未能完整推理"；单元测试覆盖 failure_reason 的三种取值（None / followup_round_capped / step_N_... ）对 risk_warnings 和 final_response 的影响 |
-| F14 | StateGraph 编排 | `src/agent/graph.py` | 注册 16 节点 + 2 条件边；顺序边 ①→①.5→②→③→④→⑤；条件边 ⑤→⑥a/⑩（两路：追问或诊断）；追问循环 ⑥a→⑥b→⑦→②；检查循环 ⑧a→⑧b→⑨→②；诊断后路由 ⑩→⑧a/⑪；安全门控 ⑪→⑫；输出链 ⑫→⑬→END；集成测试 |
+| F14 | StateGraph 编排 | `src/agent/graph.py` | 注册 15 节点 + 2 条件边；顺序边 ①→①.5→②→③→④；条件边 ④→⑤/⑩（两路：追问或诊断）；追问循环 ⑤→⑥→⑦→②；检查循环 ⑧a→⑧b→⑨→②；诊断后路由 ⑩→⑧a/⑪；安全门控 ⑪→⑫；输出链 ⑫→⑬→END；集成测试 |
 | F15 | 全工作流集成测试 | `tests/integration/test_agent_workflow.py` | Mock 存储 + Mock LLM，验证：正常路径（信息充足直接诊断）/ 追问循环（多轮追问后收敛）/ 检查循环（建议检查→结果回传→重新诊断）/ 信息不足路径 四条典型路径；安全门控过滤验证（过敏药物排除、配伍禁忌拦截） |
 
 ---
@@ -3990,9 +3990,9 @@ flowchart TD
 | F3 | 节点 ②：build_query | [x] | 2026-05-12 | 4 步：NER → EL（每实体一次）→ 确定性术语扩展 → Query 构建；首轮自动初始化 confirmed/denied；check path 跳 Step1/2；3 unit PASS |
 | F4 | 节点 ③：retrieve | [x] | 2026-05-12 | dense + sparse 双路 + RRF 融合；PG callable 注入（`utils/chunks_lookup.py`）补 summary/question matched_text；3 unit PASS |
 | F5 | 节点 ④：extract_symptoms | [x] | 2026-05-12 | 零 LLM：TF-IDF 关键词 + 三层归一化（Tier1 alias 精确 / Tier2 向量阈值 / Tier3 保留原文）；3 unit PASS |
-| F6 | 节点 ⑤：select_discriminative_symptom | [x] | 2026-05-12 | 维度缺口配额制（≤2）+ 报告证据消费 + 已问过滤（Tier3 软比对）+ 信息增益贪心 + 可问性评估循环 + 阈值兜底；4 unit PASS |
+| F6 | 节点 ④：select_discriminative_symptom | [x] | 2026-05-12 | 维度缺口配额制（≤2）+ 报告证据消费 + 已问过滤（Tier3 软比对）+ 信息增益贪心 + 可问性评估循环 + 阈值兜底；4 unit PASS |
 | F7 | 条件路由：should_continue | [x] | 2026-05-12 | 纯函数，三分支（cap / questions / 其他）；4 unit PASS（含不修改 State 验证） |
-| F8 | 节点 ⑥⑦：追问循环 | [x] | 2026-05-12 | ⑥a 自由文本生成 + ⑥b interrupt 等待 + ⑦ structured 解析（三类回答 + 维度回填 + present_illness 追加）；5 unit PASS |
+| F8 | 节点 ⑤⑥⑦:追问循环 | [x] | 2026-05-12 | ⑤ 自由文本生成 + ⑥ interrupt 等待 + ⑦ structured 解析（三类回答 + 维度回填 + present_illness 追加）；5 unit PASS |
 | F9 | 节点 ⑧⑨：检查循环 | [x] | 2026-05-12 | ⑧a 自由文本检查推荐 + ⑧b interrupt 等待 + ⑨ 复用 report_parser（全局 report_index 重映射）；4 unit PASS |
 | F10 | 节点 ⑩：diagnose | [x] | 2026-05-19 | Step-1 cap 短路 + Step0 reranker（已有 fallback）+ Step0.5 父块扩展(删 vector_hints) + **1 步 LLM 诊断**(原生多模态 qwen3.5-plus,对齐 RAG 评测口径) + LLM 失败兜底 insufficient + failure_reason + last_diagnose_prompt/raw_output 写入；5 unit PASS（4 路径 + retained_unaskable 写回） |
 | F11 | 条件路由：diagnose_router | [x] | 2026-05-12 | 纯函数：need_exam 且 exam_round<MAX → recommend_exam；否则 → safety_gate；5 unit PASS |
@@ -4098,7 +4098,7 @@ src/agent/schemas/
 | 安全等级 | 最多尝试次数 | 失败后行为 | 适用场景 |
 |---------|------------|-----------|---------|
 | **高**（影响诊断安全） | 3（首次 + 2 次重试，对应 `stop_after_attempt=3`） | 产出兜底保守值，确保流水线不中断、结果偏保守而非偏激进 | ⑩ 诊断推理、⑪ 安全门控 |
-| **中**（影响流水线流转） | 3（首次 + 2 次重试，对应 `stop_after_attempt=3`） | 抛 `StructuredOutputError`，由 StateGraph 错误处理捕获并终止当前会话，返回用户友好错误提示 | ①②⑤⑦⑧⑫ 等核心 Agent 节点 |
+| **中**（影响流水线流转） | 3（首次 + 2 次重试，对应 `stop_after_attempt=3`） | 抛 `StructuredOutputError`，由 StateGraph 错误处理捕获并终止当前会话，返回用户友好错误提示 | ①②④⑦⑧⑫ 等核心 Agent 节点 |
 | **低**（不影响主流程） | 2（首次 + 1 次重试，对应 `stop_after_attempt=2`） | 跳过当前项 / 降级为无增强数据继续 | enrichment（跳过该 chunk 增强）、evaluation（标记该 case 评估失败） |
 
 实现模式（伪代码）：
@@ -4281,9 +4281,9 @@ Schema 字段一旦上线即进入两个长生命周期消费路径，**不允�
 | ①.5 `analyze_initial_reports` / ⑨ `process_exam_result` | `ReportFindings` | `findings: list[ReportFinding]`；每项含 `report_type: str`, `abnormal_values: list[str]`, `impressions: list[str]`, `positive_findings: list[str]`, `negative_findings: list[str]` | 中 | 最多尝试 3 次；仍失败则该份报告标记解析失败，`report_findings` 不追加该项，流水线继续（降级为无该报告证据） |
 | ② `build_query` Step 1 NER | `NERResult` | `entities: list[NEREntity]`;每项含 `text: str`, `entity_type: Literal["symptom","disease","drug","anatomy"]`, `negation: bool`, `temporality: Literal["current","past","family"]`, `value: str｜None` | 中 | 最多尝试 3 次;仍失败则抛异常 |
 | ② `build_query` Step 3 Query 构建 | `QueryConstructionOutput` | `dense_query: str`(单字段;sparse_queries 由 Step 2 确定性产出,不进 LLM 输出) | 中 | 最多尝试 3 次;仍失败则抛异常 |
-| ⑤ `select_symptom` 智能追问选择 | `SmartFollowupOutput` | `questions: list[FollowupQuestion]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `type: Literal["slot","open"]` + `slot: str\|None`;`unaskable_symptoms: list[UnaskableSymptom]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `description: str` + `reason: str`(粗筛版,⑩ Step 3 会精筛覆盖) | 中 | 最多尝试 3 次;仍失败则返回空 questions + 空 unaskable → `should_continue` 路由跳诊断 |
+| ④ `select_symptom` 智能追问选择 | `SmartFollowupOutput` | `questions: list[FollowupQuestion]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `type: Literal["slot","open"]` + `slot: str\|None`;`unaskable_symptoms: list[UnaskableSymptom]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `description: str` + `reason: str`(粗筛版,⑩ Step 3 会精筛覆盖) | 中 | 最多尝试 3 次;仍失败则返回空 questions + 空 unaskable → `should_continue` 路由跳诊断 |
 | ⑦ `process_followup_answer` | `FollowupParseResult` | `symptom_responses: list[dict]`（每项含 `term: str`, `status: Literal["confirmed","denied","uncertain","unanswered"]`）, `slot_fills: dict[str, str \| list[str]]`（维度级回填，单值槽 str / 多值槽 list[str]，与 `PresentIllnessSlots` 类型对齐）, `new_symptoms: list[str]` | 中 | 最多尝试 3 次；仍失败则抛异常（追问回答未解析将导致信息丢失） |
-| ⑩ `diagnose` 1 步 LLM（**原生多模态模型** — `settings.llm.VISION_BASE_URL` / `VISION_API_KEY` / `VISION_MODEL_NAME`，DashScope qwen3.5-plus） | `DiagnosisOutput` | `results: list[RankedDisease]`（每项 disease / probability / evidence / differentiation / differentiation_type / failure_reason）+ `retained_unaskable: list[UnaskableSymptom]`（精筛覆盖 ⑤ 粗筛 → 写回 `state.unaskable_symptoms` 供 ⑧a 消费）；context 含 figure 时 `image_path` 转 base64 作为多模态消息送入（详见 §3.2.3 LLM 路由段）；完整定义见 §9.5 | 高 | 最多尝试 3 次；失败兜底产出 insufficient 结果并在 `failure_reason` 字段记录 `"step_1_structured_output_failed: <ExcType>: <msg>"`（详见 4.1.2 ⑩ 结构化输出保障） |
+| ⑩ `diagnose` 1 步 LLM（**原生多模态模型** — `settings.llm.VISION_BASE_URL` / `VISION_API_KEY` / `VISION_MODEL_NAME`，DashScope qwen3.5-plus） | `DiagnosisOutput` | `results: list[RankedDisease]`（每项 disease / probability / evidence / differentiation / differentiation_type / failure_reason）+ `retained_unaskable: list[UnaskableSymptom]`（精筛覆盖 ④ 粗筛 → 写回 `state.unaskable_symptoms` 供 ⑧a 消费）；context 含 figure 时 `image_path` 转 base64 作为多模态消息送入（详见 §3.2.3 LLM 路由段）；完整定义见 §9.5 | 高 | 最多尝试 3 次；失败兜底产出 insufficient 结果并在 `failure_reason` 字段记录 `"step_1_structured_output_failed: <ExcType>: <msg>"`（详见 4.1.2 ⑩ 结构化输出保障） |
 | ⑧a `recommend_exam` | `RecommendExamOutput` | `tests: list[str]`（每项一个检查名，如"血常规"/"腹部 CT"，期望 3-5 项）, `rationale: str`（整体说明，2-3 句） | 中 | 最多尝试 3 次；仍失败则抛异常终止会话（检查推荐失败说明 LLM 完全不可用） |
 | ⑪ `safety_gate` LLM 兜底 | `SafetyGateOutput` | `additional_risks: list[dict]`（每项含 `risk_type: Literal["cross_allergy","interaction","dosage_adjustment"]`, `description: str`, `severity: Literal["high","medium","low"]`, `recommendation: str`） | 高 | 最多尝试 3 次；仍失败则走保守路径——LLM 兜底层视为"无法排除风险"，在 `safety_constraints` 中追加通用警告："LLM 安全评估不可用，建议线下由药师复核" |
 | ⑫ `generate_advice` | `AdviceOutput` | `medications: list[dict]`, `exam_suggestions: list[str]`, `risk_warnings: list[str]`, `urgent_flag: bool` | 中 | 最多尝试 3 次；仍失败则抛异常 |
@@ -4316,7 +4316,7 @@ Schema 字段一旦上线即进入两个长生命周期消费路径，**不允�
 
 | 调用点 | 输出形式 | 说明 |
 |-------|---------|------|
-| ⑥a `generate_followup` | 自然语言追问句 | 面向患者的口语化问题，不需要结构化 |
+| ⑤ `generate_followup` | 自然语言追问句 | 面向患者的口语化问题，不需要结构化 |
 | ⑬ `format_response` | 自然语言最终回复 | 整合诊断与建议的患者可读回复 + 免责声明 |
 | 4.2.4 `compact_context` | 压缩摘要文本 | 内部上下文压缩，仅供后续节点 prompt 拼装使用（当前未启用） |
 | 评估层 `patient_simulation` | 模拟患者回答 | 自由文本角色扮演 |
@@ -4432,7 +4432,7 @@ class QueryConstructionOutput(BaseModel):
 ```python
 # —— 子模型:被 SmartFollowupOutput.questions 引用 ——
 class FollowupQuestion(BaseModel):
-    """⑤ select_symptom 单条追问项。"""
+    """④ select_symptom 单条追问项。"""
     type: Literal["slot", "open"] = Field(...,
         description="slot=补全 13 维 HPI 空槽;open=开放式问'还有别的不舒服吗'")
     slot: str | None = Field(None,
@@ -4440,9 +4440,9 @@ class FollowupQuestion(BaseModel):
 
 # —— 子模型:被 SmartFollowupOutput.unaskable_symptoms / DiagnosisOutput.retained_unaskable 引用 ——
 class UnaskableSymptom(BaseModel):
-    """LLM 想知道但患者答不上的体征/指标(⑤ 粗筛 + ⑩ 精筛共用 schema)。
+    """LLM 想知道但患者答不上的体征/指标(④ 粗筛 + ⑩ 精筛共用 schema)。
 
-    ⑤ 出粗筛喂给 ⑩ Step 2 判 need_exam;⑩ Step 3 基于诊断结果挑出"仍需检查
+    ④ 出粗筛喂给 ⑩ Step 2 判 need_exam;⑩ Step 3 基于诊断结果挑出"仍需检查
     确认的"写回 state.unaskable_symptoms,⑧a 直接消费 description 作为检查建议来源。
     """
     description: str = Field(..., description="医生侧语言:想查什么 / 想知道什么体征,如'腹部 B 超提示有无胆囊壁增厚'")
@@ -4450,7 +4450,7 @@ class UnaskableSymptom(BaseModel):
 
 # —— 主模型:传给 llm.with_structured_output() ——
 class SmartFollowupOutput(BaseModel):
-    """⑤ select_symptom LLM 输出 — 1 次调用同时出 2 件事。
+    """④ select_symptom LLM 输出 — 1 次调用同时出 2 件事。
 
     LLM 输入 patient state(主诉 + 13 维 slots 空缺 + 已问症状),输出:
     - questions:追问项(slot 维度补全 / open 开放式),≤ MAX_FOLLOWUP_QUESTIONS,可为 0
@@ -4474,9 +4474,9 @@ class SmartFollowupOutput(BaseModel):
 class FollowupParseResult(BaseModel):
     """⑦ process_followup_answer LLM 输出。
 
-    ⑤ 重设计后只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"。
-    - slot_fills: 维度级回填(对应 ⑤ 的 type=slot)
-    - new_symptoms: 患者回答中提及的新症状(对应 ⑤ 的 type=open,或顺带补充),
+    ④ 重设计后只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"。
+    - slot_fills: 维度级回填(对应 ④ 的 type=slot)
+    - new_symptoms: 患者回答中提及的新症状(对应 ④ 的 type=open,或顺带补充),
       由 ⑦ 直接 append 到 confirmed_symptoms 供下轮 build_query 使用
     """
     slot_fills:   dict[str, str | list[str]] = Field(default_factory=dict, description="维度级回填,key=槽位名;value 类型与 PresentIllnessSlots 槽位一致")
@@ -4508,13 +4508,13 @@ class DiagnosisOutput(BaseModel):
     """⑩ diagnose 1 步 LLM 输出 — 诊断结果 + 精筛 unaskable。
 
     retained_unaskable 是 LLM 基于当前诊断结果挑/改写的"仍需检查确认"的 unaskable
-    列表（从输入的 ⑤ 粗筛版里筛 + 必要时改写描述），节点代码写回 state.unaskable_symptoms
+    列表（从输入的 ④ 粗筛版里筛 + 必要时改写描述），节点代码写回 state.unaskable_symptoms
     供 ⑧a recommend_exam 消费。LLM 判断不再需要的 → 不写进 retained_unaskable，自然丢弃。
     """
     results: list[RankedDisease] = Field(..., min_length=1,
                                          description="按 probability 降序排列的诊断结果列表;校验失败兜底为 [RankedDisease(disease='信息不足以支持可靠诊断', probability=0.0, ...)]")
     retained_unaskable: list[UnaskableSymptom] = Field(default_factory=list,
-        description="基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表（可为 ⑤ 粗筛版的子集或改写版）。confirmed/insufficient 路径下可为空（不会被消费）；need_exam 路径下应至少保留 1 条供 ⑧a 推荐检查")
+        description="基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表（可为 ④ 粗筛版的子集或改写版）。confirmed/insufficient 路径下可为空（不会被消费）；need_exam 路径下应至少保留 1 条供 ⑧a 推荐检查")
 ```
 
 ---
@@ -4822,9 +4822,9 @@ async def diagnose(req: DiagnoseRequest,
 |--------|--------|------|--------------|
 | `MAX_FOLLOWUP_ROUNDS` | `8` | 追问轮次硬性兜底上限 | `should_continue`(§4.1.3.1)/ ⑩ Step -1(§4.1.2)|
 | `MAX_EXAM_ROUNDS` | `3` | 检查循环硬性上限 | `diagnose_router`(§4.1.3.2)/ ⑧a `recommend_exam`(§4.1.2)|
-| `MAX_FOLLOWUP_QUESTIONS` | `5` | 单轮追问问题条数上限(slot + open type 合计) | ⑤ `select_discriminative_symptom`(§4.1.2)|
+| `MAX_FOLLOWUP_QUESTIONS` | `5` | 单轮追问问题条数上限(slot + open type 合计) | ④ `select_discriminative_symptom`(§4.1.2)|
 | `RETRIEVE_TOP_N` | `200` | RRF 融合后 Top-N 截断(送入 ⑩ Step 0 Cross-Encoder) | ③ `retrieve`(§4.1.2)/ §3.2.2 |
-| ~~`ASKABLE_GAIN_THRESHOLD`~~ | ~~`0.15`~~ | **已删除** — ⑤ 重设计为 1 LLM 直接选追问,信息增益机制废 | — |
+| ~~`ASKABLE_GAIN_THRESHOLD`~~ | ~~`0.15`~~ | **已删除** — ④ 重设计为 1 LLM 直接选追问,信息增益机制废 | — |
 | ~~`ENTITY_LINKING_TIER2_THRESHOLD`~~ | ~~`0.92`~~ | **已删除** — EL 整层移除,该阈值不再有意义。详见 §4.1.6.2 + EL_DESIGN_REVIEW §11 | — |
 | `RERANKER_CUTOFF_LAYERS` | `None`（=全层不截断；模型 layerwise 完整深度，BGE-Reranker-v2-minicpm-layerwise 为 40 层） | Cross-Encoder layerwise early-exit 截断层数；`None` = 跑满全层 | ⑩ Step 0 / Reranker 客户端（§2.3，§3.2.3）|
 | `RETRIEVE_PARENT_FIGURE_CAP` | `5` | Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶（`chunk_type ∈ {table, figure}` 计数;按 `relative_chunk_index` 升序保留前 K 个） | ⑩ Step 0 后 / Context 扩展(§3.2.3)|

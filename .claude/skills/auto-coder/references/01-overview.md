@@ -131,9 +131,9 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── info_collect.py         # 节点 ①：主诉提取 + 病史/报告加载（单轮无交互）
 │   │   │   ├── analyze_initial_reports.py  # 节点 ①.5：初始报告解析（多模态 LLM 直读，提取结构化发现）
 │   │   │   ├── build_query.py          # 节点 ②:NER + Sparse 多字段直采 + Query 构建/改写│   │   │   ├── retrieve.py             # 节点 ③：全量向量召回
-│   │   │   ├── select_symptom.py       # 节点 ⑤:智能追问选择(1 LLM,slot 维度填补 + open 兜底)
-│   │   │   ├── generate_followup.py    # 节点 ⑥a：生成追问问题
-│   │   │   ├── wait_followup_answer.py # 节点 ⑥b：interrupt 等待用户回答
+│   │   │   ├── select_symptom.py       # 节点 ④:智能追问选择(1 LLM,slot 维度填补 + open 兜底)
+│   │   │   ├── generate_followup.py    # 节点 ⑤：生成追问问题
+│   │   │   ├── wait_followup_answer.py # 节点 ⑥：interrupt 等待用户回答
 │   │   │   ├── process_followup.py     # 节点 ⑦：处理追问回答
 │   │   │   ├── recommend_exam.py       # 节点 ⑧a：生成检查建议
 │   │   │   ├── wait_exam_report.py     # 节点 ⑧b：interrupt 等待检查结果回传
@@ -298,7 +298,7 @@ Agentic-RAG-Medical-care-Assistant/
 | 3.2.1 查询预处理 | `src/rag/retrieval/query_processing.py` |
 | 3.2.2 召回（Dense + Sparse + RRF） | `src/rag/retrieval/` |
 | 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置） | `src/rag/retrieval/reranker.py` |
-| 4.1 Agent 工作流（15 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑥/⑧ 各拆 a/b）+ `routers/`（should_continue / diagnose_router） |
+| 4.1 Agent 工作流（15 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑧ 拆 a/b — 原 ⑥a/⑥b 已平铺为 ⑤/⑥）+ `routers/`（should_continue / diagnose_router） |
 | 4.2 上下文管理 | `src/rag/context/` |
 | 5.1 Redis 缓存 | `src/db/redis/cache.py` |
 | 5.2 监控层 | `infra/prometheus/` + `infra/grafana/` + `infra/loki/` |
@@ -323,7 +323,7 @@ Agentic-RAG-Medical-care-Assistant/
 - FastAPI 应用（`src/api/app.py`），提供诊断、患者管理、健康检查、管理等路由
 - 请求/响应 Schema 校验（`src/api/schemas/`）
 - 状态图驱动的多步诊断流程(`src/agent/graph.py`),HPI 13 维填空驱动的迭代式追问工作流
-- 节点(15 个):病史采集、初始报告解析、Query 构建、向量召回、智能追问选择、追问生成(⑥a)、追问等待(⑥b)、追问处理、建议检查(⑧a)、检查结果等待(⑧b)、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复(`src/agent/nodes/`)
+- 节点(15 个):病史采集、初始报告解析、Query 构建、向量召回、智能追问选择、追问生成(⑤)、追问等待(⑥)、追问处理、建议检查(⑧a)、检查结果等待(⑧b)、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复(`src/agent/nodes/`)
 - 路由器（2 个）：should_continue（追问/诊断两路路由）、diagnose_router（诊断后路由：need_exam / safety_gate）（`src/agent/routers/`）
 - 数据摄取 Pipeline：MinerU 文档解析 → Chunking → LLM 增强（摘要/问题生成/图片描述） → 幂等写入 → Embedding → 向量存储（`src/rag/ingestion/`）
 - 检索 Pipeline：查询处理 → Dense/Sparse 双路检索 → RRF 融合（`src/rag/retrieval/`）

@@ -1,9 +1,9 @@
 """tests/unit/test_node_followup_loop.py — F8 追问循环单元测试。
 
-⑥a generate_followup(自由文本)+ ⑥b wait_followup_answer(interrupt)+ ⑦
+⑤ generate_followup(自由文本)+ ⑥ wait_followup_answer(interrupt)+ ⑦
 process_followup_answer(structured)。
 
-⑤ 重设计后,⑦ 只处理两种 followup type:slot(维度回填)+ open(新症状回填)。
+④ 重设计后,⑦ 只处理两种 followup type:slot(维度回填)+ open(新症状回填)。
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from src.agent.state import create_initial_state
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑥a generate_followup
+# ⑤ generate_followup
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -52,7 +52,7 @@ def test_generate_followup_empty_questions_returns_empty_string(mock_llm_factory
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑥b wait_followup_answer
+# ⑥ wait_followup_answer
 # ────────────────────────────────────────────────────────────────────────────
 
 

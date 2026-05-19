@@ -1,6 +1,6 @@
-"""Agent ⑤ select_discriminative_symptom LLM 输出 schema(DEV_SPEC §9.5)。
+"""Agent ④ select_discriminative_symptom LLM 输出 schema(DEV_SPEC §9.5)。
 
-⑤ 节点 1 次 LLM 调用直接选三件事:
+④ 节点 1 次 LLM 调用直接选三件事:
 - questions:追问项(slot 维度补全 / open 开放式),≤ MAX_FOLLOWUP_QUESTIONS
 - unaskable_symptoms:LLM 自己想知道但患者答不上的体征/指标(粗筛),
   后续 ⑩ Step 3 会基于诊断结果再次校准,挑出"诊断后仍需检查确认的"写回
@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 
 class FollowupQuestion(BaseModel):
-    """⑤ select_symptom 单条追问项。"""
+    """④ select_symptom 单条追问项。"""
 
     type: Literal["slot", "open"] = Field(
         ...,
@@ -30,9 +30,9 @@ class FollowupQuestion(BaseModel):
 
 
 class UnaskableSymptom(BaseModel):
-    """LLM 想知道但患者答不上的体征/指标(⑤ 粗筛 + ⑩ 精筛共用)。
+    """LLM 想知道但患者答不上的体征/指标(④ 粗筛 + ⑩ 精筛共用)。
 
-    ⑤ 出粗筛喂给 ⑩ Step 2 判 need_exam;⑩ Step 3 基于诊断结果挑出"仍需
+    ④ 出粗筛喂给 ⑩ Step 2 判 need_exam;⑩ Step 3 基于诊断结果挑出"仍需
     检查确认的"写回 state,⑧a 直接消费 description 作为检查建议来源。
     """
 
@@ -47,7 +47,7 @@ class UnaskableSymptom(BaseModel):
 
 
 class SmartFollowupOutput(BaseModel):
-    """⑤ select_symptom LLM 输出。"""
+    """④ select_symptom LLM 输出。"""
 
     questions: list[FollowupQuestion] = Field(
         default_factory=list,

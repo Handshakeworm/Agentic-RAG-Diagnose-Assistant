@@ -54,7 +54,7 @@ class DiagnosisOutput(BaseModel):
     """⑩ diagnose 1 步 LLM 输出 — 诊断结果 + 精筛 unaskable。
 
     `retained_unaskable` 是 LLM 基于当前诊断结果挑/改写的"仍需检查确认"的 unaskable
-    列表(从输入的 ⑤ 粗筛版里筛 + 必要时改写描述),节点代码写回 `state.unaskable_symptoms`
+    列表(从输入的 ④ 粗筛版里筛 + 必要时改写描述),节点代码写回 `state.unaskable_symptoms`
     供 ⑧a recommend_exam 消费。LLM 判断不再需要的 → 不写进 retained_unaskable,自然丢弃。
     """
 
@@ -64,7 +64,7 @@ class DiagnosisOutput(BaseModel):
     retained_unaskable: list[UnaskableSymptom] = Field(
         default_factory=list,
         description=(
-            "基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表(可为 ⑤ 粗筛版的子集"
+            "基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表(可为 ④ 粗筛版的子集"
             "或改写版)。confirmed/insufficient 路径下可为空(不会被消费);need_exam"
             "路径下应至少保留 1 条供 ⑧a 推荐检查"
         ),

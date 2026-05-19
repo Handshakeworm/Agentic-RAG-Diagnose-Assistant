@@ -3,7 +3,7 @@
 LLM 解析患者回答 → 维度级槽位回填 + 新症状提取。followup_round += 1 后回到
 build_query 复跑流水线。
 
-⑤ 已重设计为只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"分支 —
+④ 已重设计为只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"分支 —
 开放式追问得到的新症状统一进 `new_symptoms` 字段,本节点直接 append 到 confirmed_symptoms。
 
 中安全等级:失败 → 抛异常终止会话(回答未解析将导致信息丢失,不能静默)。
@@ -113,7 +113,7 @@ def process_followup_answer(state: MedicalState) -> dict:
     uncertain = list(state.uncertain_symptoms)
 
     # spec §4.1.2 ⑦:开放式追问的新症状 + 患者顺带补充的副症状,统一进 confirmed_symptoms。
-    # ⑤ 已重设计为只产 slot / open 两类追问,无 yes/no 症状级分流。
+    # ④ 已重设计为只产 slot / open 两类追问,无 yes/no 症状级分流。
     already_known = set(confirmed) | set(denied) | set(uncertain)
     for term in result.new_symptoms:
         if term and term not in already_known:

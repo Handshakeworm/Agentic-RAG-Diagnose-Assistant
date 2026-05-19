@@ -322,7 +322,7 @@ CREATE INDEX idx_raw_documents_content_list_gin ON raw_documents USING GIN (cont
 | 字段 | 来源 | 主要用途 |
 |------|------|---------|
 | `markdown_content` | `target_document.md` | 渲染产物(同信息以 markdown 文本形式呈现),保留作为 raw 备份与版面追溯辅助。**chunking 不消费此字段**,所有切分逻辑直接读 `content_list`(§3.1.2 切分主流程基于 mineru block 结构,不基于 markdown 字符流) |
-| `content_list` | `content_list_v2.json` | 页级嵌套结构(详见 §2.4.4.1);chunking 阶段是**唯一输入**,用作:① 目录页提取本书目录权威清单(§3.1.2 Step 1)、② 正文 title block 匹配字典找节边界(§3.1.2 Step 2)、③ 节内 paragraph/title/list 等 block 累积切父块/子块、④ 识别表格/chart 块做双粒度处理、⑤ 噪音 type 过滤(黑名单);GIN 索引支持按 type 聚合查询。**注**:`title.level` 字段全是 1,无意义,不读 |
+| `content_list` | `content_list_v2.json` | 页级嵌套结构(详见 §2.4.4.1);chunking 阶段是**唯一输入**,用作:① 目录页提取本书目录权威清单(§3.1.2 Step 1)、② 正文 title block 匹配字典找节边界(§3.1.2 Step 2)、③ 节内 paragraph/title/list 等 block 累积切父块/子块、④ 识别表格/chart 块做双粒度处理、④ 噪音 type 过滤(黑名单);GIN 索引支持按 type 聚合查询。**注**:`title.level` 字段全是 1,无意义,不读 |
 | `middle_data` | `middle.json` | 体积最大(典型 16-84MB,极端 300MB+),含 token 级 bbox,排查解析异常时使用 |
 | `model_data` | `model.json` | 模型推理细节(典型 2-19MB),想看 mineru 模型对某块的 layout 分类置信度时翻它 |
 | `pdf_path` | 文件系统 | 原始 PDF 路径引用,PDF 本体存本地磁盘 |

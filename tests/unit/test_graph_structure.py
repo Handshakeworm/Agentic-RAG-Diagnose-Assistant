@@ -6,7 +6,7 @@ from __future__ import annotations
 
 
 def test_graph_has_all_15_nodes():
-    """⑤ 重设计后,④ extract_symptoms 节点已删,从 16 → 15。"""
+    """④ 重设计后,④ extract_symptoms 节点已删,从 16 → 15。"""
     from src.agent.graph import build_graph
 
     g = build_graph()

@@ -1,8 +1,8 @@
 """Agent ⑦ process_followup_answer LLM 输出 schema(DEV_SPEC §9.5 第 7 项)。
 
-⑦ 解析患者对 ⑥a 追问的回答,产出两类信息:
-  - slot_fills: 维度级回填(对应 ⑤ 选出的 type=slot 追问项)
-  - new_symptoms: 患者回答中主动提到的新症状(对应 ⑤ 选出的 type=open 追问项,
+⑦ 解析患者对 ⑤ 追问的回答,产出两类信息:
+  - slot_fills: 维度级回填(对应 ④ 选出的 type=slot 追问项)
+  - new_symptoms: 患者回答中主动提到的新症状(对应 ④ 选出的 type=open 追问项,
     或患者顺带补充的副症状),直接进 confirmed_symptoms 供下轮 build_query 使用
 """
 from __future__ import annotations

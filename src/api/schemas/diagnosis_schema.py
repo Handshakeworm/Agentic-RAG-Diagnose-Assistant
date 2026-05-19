@@ -46,7 +46,7 @@ DiagnoseStatus = Literal["ongoing_followup", "ongoing_exam", "completed"]
 
 
 class DiagnoseResponse(BaseModel):
-    """POST /diagnose 响应体。字段语义与 graph 状态机对齐(spec §4.1.2 ⑥/⑧/⑬)。"""
+    """POST /diagnose 响应体。字段语义与 graph 状态机对齐(spec §4.1.2 ⑤+⑥/⑧/⑬)。"""
 
     session_id: str
     status: DiagnoseStatus

@@ -352,7 +352,7 @@ def diagnose(state: MedicalState) -> dict:
             time.perf_counter() - t0
         )
 
-    # 正常路径产出 — retained_unaskable 覆盖 ⑤ 写的粗筛版,供 ⑧a recommend_exam 消费
+    # 正常路径产出 — retained_unaskable 覆盖 ④ 写的粗筛版,供 ⑧a recommend_exam 消费
     return {
         "diagnosis_result": [r.model_dump() for r in result.results],
         "unaskable_symptoms": [u.model_dump() for u in result.retained_unaskable],

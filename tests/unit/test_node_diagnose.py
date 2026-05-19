@@ -95,12 +95,12 @@ def test_normal_single_step_succeeds(mock_llm, _lookup, _rerank):
     # 正常路径不写 last_diagnose_prompt / raw_output
     assert "last_diagnose_prompt" not in update
     assert "last_diagnose_raw_output" not in update
-    # 正常路径必须写回 unaskable_symptoms(覆盖 ⑤ 粗筛);本 case LLM 返空 = 清空
+    # 正常路径必须写回 unaskable_symptoms(覆盖 ④ 粗筛);本 case LLM 返空 = 清空
     assert update["unaskable_symptoms"] == []
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# retained_unaskable 写回:覆盖 ⑤ 粗筛
+# retained_unaskable 写回:覆盖 ④ 粗筛
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -134,7 +134,7 @@ def test_retained_unaskable_overwrites_state(mock_llm, _lookup, _rerank):
     )
 
     s = _state_for_diagnose()
-    # 模拟 ⑤ 已经写过粗筛(2 条),验证 ⑩ 输出会**覆盖**这份
+    # 模拟 ④ 已经写过粗筛(2 条),验证 ⑩ 输出会**覆盖**这份
     s.unaskable_symptoms = [
         {"description": "肝功能", "reason": "粗筛随便填的"},
         {"description": "胰酶", "reason": "粗筛随便填的"},

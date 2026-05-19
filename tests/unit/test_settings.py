@@ -31,7 +31,7 @@ def test_agent_limits_initial_values_match_spec_9_7_1() -> None:
     assert fields["MAX_FOLLOWUP_QUESTIONS"].default == 5
     assert fields["RETRIEVE_TOP_N"].default == 200
     # 注:ENTITY_LINKING_TIER2_THRESHOLD 字段已随 EL 移除一并删除
-    # ASKABLE_GAIN_THRESHOLD 已随 ⑤ 重设计删除(信息增益机制不再使用)
+    # ASKABLE_GAIN_THRESHOLD 已随 ④ 重设计删除(信息增益机制不再使用)
     assert "ENTITY_LINKING_TIER2_THRESHOLD" not in fields
     assert "ASKABLE_GAIN_THRESHOLD" not in fields
     assert fields["RERANKER_CUTOFF_LAYERS"].default is None  # 全 40 层(模型 layerwise 完整深度)
