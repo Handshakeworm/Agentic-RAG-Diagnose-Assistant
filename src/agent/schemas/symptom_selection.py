@@ -3,7 +3,7 @@
 ④ 节点 1 次 LLM 调用直接选三件事:
 - questions:追问项(slot 维度补全 / open 开放式),≤ MAX_FOLLOWUP_QUESTIONS
 - unaskable_symptoms:LLM 自己想知道但患者答不上的体征/指标(粗筛),
-  后续 ⑩ Step 3 会基于诊断结果再次校准,挑出"诊断后仍需检查确认的"写回
+  后续 ⑩ 会基于诊断结果再次校准,挑出"诊断后仍需检查确认的"写回
   state.unaskable_symptoms,⑧a recommend_exam 直接消费这份精筛版
 
 `UnaskableSymptom` 同时被 ⑩ `DiagnosisOutput.retained_unaskable` 复用,字段
@@ -32,7 +32,7 @@ class FollowupQuestion(BaseModel):
 class UnaskableSymptom(BaseModel):
     """LLM 想知道但患者答不上的体征/指标(④ 粗筛 + ⑩ 精筛共用)。
 
-    ④ 出粗筛喂给 ⑩ Step 2 判 need_exam;⑩ Step 3 基于诊断结果挑出"仍需
+    ④ 出粗筛喂给 ⑩ 判 need_exam;⑩ 基于诊断结果挑出"仍需
     检查确认的"写回 state,⑧a 直接消费 description 作为检查建议来源。
     """
 

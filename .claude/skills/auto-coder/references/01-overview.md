@@ -138,7 +138,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── recommend_exam.py       # 节点 ⑧a：生成检查建议
 │   │   │   ├── wait_exam_report.py     # 节点 ⑧b：interrupt 等待检查结果回传
 │   │   │   ├── process_exam_result.py  # 节点 ⑨：处理检查结果回传
-│   │   │   ├── diagnose.py             # 节点 ⑩：诊断推理（Cross-Encoder 截断 + 三步分阶段 LLM 推理）
+│   │   │   ├── diagnose.py             # 节点 ⑩：诊断推理（Cross-Encoder 截断 + 父块扩展 + 1 步 LLM）
 │   │   │   ├── safety_gate.py           # 节点 ⑪：安全约束门控（规则+LLM）
 │   │   │   ├── generate_advice.py      # 节点 ⑫：生成建议（用药/检查/高危提示）
 │   │   │   └── format_response.py      # 节点 ⑬：格式化最终回复

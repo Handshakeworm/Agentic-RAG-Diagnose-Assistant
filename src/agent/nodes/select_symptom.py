@@ -99,7 +99,7 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
 
     - `followup_questions`:追问项(slot 维度补全 / open 开放式);空 → 路由跳诊断
     - `unaskable_symptoms`:LLM 想知道但患者答不上的体征/指标(粗筛版),
-      ⑩ Step 3 会基于诊断结果再次校准并覆盖此字段
+      ⑩ 会基于诊断结果再次校准并覆盖此字段
     """
     result = _call_smart_followup(state)
     # 边界校验:slot type 必须带 slot 名;open type 不带

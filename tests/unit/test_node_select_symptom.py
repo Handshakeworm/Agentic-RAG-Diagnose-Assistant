@@ -76,7 +76,7 @@ def test_empty_questions_means_info_sufficient(mock_llm):
 def test_unaskable_symptoms_passes_through(mock_llm):
     """LLM 输出的 unaskable_symptoms 应原样转 dict 写入 state。
 
-    后续 ⑩ Step 3 会基于诊断结果再次精筛覆盖,这一步只验证 ④ 的转储不丢/不改字段。
+    后续 ⑩ 会基于诊断结果再次精筛覆盖,这一步只验证 ④ 的转储不丢/不改字段。
     """
     from src.agent.nodes.select_symptom import select_discriminative_symptom
 

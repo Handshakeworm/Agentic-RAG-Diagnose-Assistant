@@ -138,7 +138,7 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── recommend_exam.py       # 节点 ⑧a：生成检查建议
 │   │   │   ├── wait_exam_report.py     # 节点 ⑧b：interrupt 等待检查结果回传
 │   │   │   ├── process_exam_result.py  # 节点 ⑨：处理检查结果回传
-│   │   │   ├── diagnose.py             # 节点 ⑩：诊断推理（Cross-Encoder 截断 + 三步分阶段 LLM 推理）
+│   │   │   ├── diagnose.py             # 节点 ⑩：诊断推理（Cross-Encoder 截断 + 父块扩展 + 1 步 LLM）
 │   │   │   ├── safety_gate.py           # 节点 ⑪：安全约束门控（规则+LLM）
 │   │   │   ├── generate_advice.py      # 节点 ⑫：生成建议（用药/检查/高危提示）
 │   │   │   └── format_response.py      # 节点 ⑬：格式化最终回复
@@ -2586,14 +2586,14 @@ graph TD;
     N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
     N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N5("④ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
-    N6("⑤ generate_followup<br/><i>生成追问问题</i>")
-    N6b("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
+    N4("④ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
+    N5("⑤ generate_followup<br/><i>生成追问问题</i>")
+    N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
     N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
     N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
     N9("⑨ process_exam_result<br/><i>处理检查结果回传</i>")
-    N10("⑩ diagnose<br/><i>诊断推理（Cross-Encoder 截断 + 三步分阶段 LLM 推理）</i>")
+    N10("⑩ diagnose<br/><i>诊断推理(Cross-Encoder 截断 + 父块扩展 + 1 步 LLM,原生多模态)</i>")
     N11("⑪ safety_gate<br/><i>安全约束门控（规则+LLM）</i>")
     N12("⑫ generate_advice<br/><i>生成建议</i>")
     N13("⑬ format_response<br/><i>格式化最终回复</i>")
@@ -2603,11 +2603,11 @@ graph TD;
     N1 -->|"主诉提取+DB病史/报告加载"| N1b;
     N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
     N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
-    N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N5;
-    N5 -.->|"followup_questions 非空 → 继续追问"| N6;
-    N5 -.->|"followup_questions 为空 → 进入诊断"| N10;
-    N6 -->|"生成问题写入State"| N6b;
-    N6b -->|"interrupt等待用户回答"| N7;
+    N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
+    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
+    N4 -.->|"followup_questions 为空 → 进入诊断"| N10;
+    N5 -->|"生成问题写入State"| N6;
+    N6 -->|"interrupt等待用户回答"| N7;
     N7 -->|"更新症状,重新召回"| N2;
     N8 -->|"生成建议写入State"| N8b;
     N8b -->|"interrupt等待检查结果"| N9;

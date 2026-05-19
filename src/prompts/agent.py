@@ -342,7 +342,7 @@ def build_recommend_exam_prompt(
 ) -> str:
     """⑧a recommend_exam(自由文本):基于诊断结果 + 不可问体征推断需要的检查。
 
-    `unaskable_symptoms` 是 ⑩ Step 3 精筛过的版本(`{description, reason}` 结构),
+    `unaskable_symptoms` 是 ⑩ 精筛过的版本(`{description, reason}` 结构),
     可直接据 description 拟检查建议。
     """
     diag_lines = [
