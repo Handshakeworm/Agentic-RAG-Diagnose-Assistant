@@ -136,7 +136,7 @@ def test_rag_trace_full_15_field_insert(user_and_session) -> None:
             "chief_complaint": "腹痛 3 天",
             "confirmed_symptoms": ["反酸", "进食后加重"],
             "denied_symptoms": [],
-            "standardized_entities": [{"text": "腹痛", "code": "R10.9"}],
+            # standardized_entities 字段已随 EL 移除一并删除
         },
         retrieved_chunks=[{"chunk_id": "c1", "rrf_score": 0.95}],
         reranked_chunks=[{"chunk_id": "c1", "rerank_score": 0.92, "rank": 1}],

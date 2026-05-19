@@ -1,190 +1,159 @@
 """tests/unit/test_node_select_symptom.py — F6 ⑤ select_discriminative_symptom 单元测试。
 
-Mock LLM(维度选择 + 可问性评估)+ Mock embedding。验证:
-- 有空槽 → 混合输出(维度 + 症状),维度占 1~2 席
-- 无空槽 → 纯症状输出
-- 报告 positive_findings 命中 → 直接入 confirmed,不追问
-- 已问症状(confirmed/denied/uncertain)被过滤掉
-- 阈值兜底:首轮 (followup_round=0) 不触发清空,后续轮触发
+⑤ 重设计后只剩 1 处 LLM 调用,LLM 同时出:追问项(questions)+ unaskable 粗筛
+(unaskable_symptoms)。Mock LLM 返回 SmartFollowupOutput,验证主入口边界:
+- LLM 出 slot + open 混合 → followup_questions 正确转储
+- LLM 出空 questions → followup_questions 为空(信息已足,跳诊断)
+- LLM 失败 → 兜底空 followup + 空 unaskable,不抛异常
+- slot type 但 slot 字段缺失 → 该条丢弃
+- unaskable 转储 → state.unaskable_symptoms 为 LLM 输出的 dict 列表
 """
 from __future__ import annotations
 
 from unittest.mock import patch
 
 from src.agent.schemas.symptom_selection import (
-    AskabilityJudgment,
-    DimensionSelection,
+    FollowupQuestion,
+    SmartFollowupOutput,
+    UnaskableSymptom,
 )
 from src.agent.state import create_initial_state
 
 
-def _state(extracted, candidate_chunks=None, report_findings=None, **kwargs):
+def _state_with_chief(chief: str = "腹痛", **kwargs):
     s = create_initial_state(patient_id="P", patient_input="x")
-    s.chief_complaint = "腹痛"
-    s.extracted_symptoms = extracted
-    s.candidate_chunks = candidate_chunks or [
-        {
-            "source_chunk_id": f"c{i}",
-            "rrf_score": 0.1,
-            "vector_hits": [
-                {"vector_type": "original", "rank": i, "matched_text": text}
-            ],
-        }
-        for i, text in enumerate(
-            [
-                "急性胆囊炎 反酸 烧心 腹痛 进食后",
-                "胃溃疡 反酸 烧心 上腹痛 进食后加重",
-                "胃食管反流 反酸 烧心",
-                "胆结石 腹痛 进食后",
-            ]
-        )
-    ]
-    s.report_findings = report_findings or []
+    s.chief_complaint = chief
     for k, v in kwargs.items():
         setattr(s, k, v)
     return s
 
 
-@patch("src.agent.nodes.select_symptom.get_embedding_model")
 @patch("src.agent.nodes.select_symptom.get_llm")
-def test_dimension_quota_with_symptoms_first_round(mock_llm, mock_embed):
-    """有空槽 → 维度占 1~2 席;首轮即使症状级增益低也不清空。"""
+def test_slot_and_open_mixed(mock_llm):
+    """LLM 出 slot + open 混合 → followup_questions 完整转储。"""
     from src.agent.nodes.select_symptom import select_discriminative_symptom
 
-    mock_embed.return_value.encode.return_value = []
     mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
-
-    # 第 1 个 invoke:dimension selection
-    # 后续 invoke:每症状可问性评估
-    mock_chain.invoke.side_effect = [
-        DimensionSelection(selected_slots=["trigger", "aggravating"]),
-        AskabilityJudgment(askable=True, reason="患者可感"),
-        AskabilityJudgment(askable=True, reason="患者可感"),
-        AskabilityJudgment(askable=True, reason="患者可感"),
-        AskabilityJudgment(askable=True, reason="患者可感"),
-        AskabilityJudgment(askable=True, reason="患者可感"),
-    ]
-
-    s = _state(
-        extracted=[
-            {"text": "反酸", "preferred_term": "反酸", "linked": True},
-            {"text": "烧心", "preferred_term": "烧心", "linked": True},
-            {"text": "进食后", "preferred_term": "进食后加重", "linked": True},
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[
+            FollowupQuestion(type="slot", slot="trigger"),
+            FollowupQuestion(type="slot", slot="location"),
+            FollowupQuestion(type="open", slot=None),
         ]
     )
+
+    s = _state_with_chief()
     update = select_discriminative_symptom(s)
 
     fq = update["followup_questions"]
+    assert len(fq) == 3
     types = [q["type"] for q in fq]
-    assert types.count("dimension") == 2
-    assert "symptom" in types
-    assert len(fq) <= 5  # MAX_FOLLOWUP_QUESTIONS
+    assert types.count("slot") == 2
+    assert types.count("open") == 1
+    # slot type 应带 slot 字段;open type 不应有
+    slot_items = [q for q in fq if q["type"] == "slot"]
+    assert all("slot" in q and q["slot"] for q in slot_items)
+    open_items = [q for q in fq if q["type"] == "open"]
+    assert all("slot" not in q for q in open_items)
 
 
-@patch("src.agent.nodes.select_symptom.get_embedding_model")
 @patch("src.agent.nodes.select_symptom.get_llm")
-def test_no_empty_slots_pure_symptom_path(mock_llm, mock_embed):
-    """无空槽 → followup_questions 全是症状,无 LLM 维度调用。"""
+def test_empty_questions_means_info_sufficient(mock_llm):
+    """LLM 出空 questions + 空 unaskable → 都为空,路由会跳诊断。"""
     from src.agent.nodes.select_symptom import select_discriminative_symptom
-    from src.agent.state import PresentIllnessSlots
 
-    mock_embed.return_value.encode.return_value = []
     mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
-    mock_chain.invoke.side_effect = [
-        AskabilityJudgment(askable=True, reason="ok"),
-        AskabilityJudgment(askable=True, reason="ok"),
-    ]
+    mock_chain.invoke.return_value = SmartFollowupOutput(questions=[], unaskable_symptoms=[])
 
-    full_slots = PresentIllnessSlots(
-        onset_time="3天",
-        onset_mode="急性",
-        trigger="进食",
-        location="上腹",
-        nature="胀痛",
-        severity="中",
-        duration_pattern="持续性",
-        aggravating=["进食"],
-        relieving=["热敷"],
-        associated_symptoms=["反酸"],
-        progression="加重",
-        treatment_tried="奥美拉唑",
-        treatment_response="部分缓解",
+    s = _state_with_chief()
+    update = select_discriminative_symptom(s)
+    assert update["followup_questions"] == []
+    assert update["info_gain"] == 0.0
+    assert update["unaskable_symptoms"] == []
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_unaskable_symptoms_passes_through(mock_llm):
+    """LLM 输出的 unaskable_symptoms 应原样转 dict 写入 state。
+
+    后续 ⑩ Step 3 会基于诊断结果再次精筛覆盖,这一步只验证 ⑤ 的转储不丢/不改字段。
+    """
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot="trigger")],
+        unaskable_symptoms=[
+            UnaskableSymptom(
+                description="腹部 B 超提示有无胆囊壁增厚",
+                reason="鉴别胆囊炎 vs 胃炎",
+            ),
+            UnaskableSymptom(
+                description="血常规白细胞分类",
+                reason="判断有无感染",
+            ),
+        ],
     )
 
-    s = _state(
-        extracted=[
-            {"text": "反酸", "preferred_term": "反酸", "linked": True},
-            {"text": "烧心", "preferred_term": "烧心", "linked": True},
+    s = _state_with_chief()
+    update = select_discriminative_symptom(s)
+    assert len(update["unaskable_symptoms"]) == 2
+    assert update["unaskable_symptoms"][0] == {
+        "description": "腹部 B 超提示有无胆囊壁增厚",
+        "reason": "鉴别胆囊炎 vs 胃炎",
+    }
+    assert update["unaskable_symptoms"][1]["description"] == "血常规白细胞分类"
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_slot_type_missing_slot_name_dropped(mock_llm):
+    """slot type 但 slot 字段空 → 该条丢弃。"""
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[
+            FollowupQuestion(type="slot", slot=None),  # 缺 slot 名应丢弃
+            FollowupQuestion(type="slot", slot="trigger"),
+            FollowupQuestion(type="open", slot=None),
         ]
     )
-    s.present_illness_slots = full_slots
+
+    s = _state_with_chief()
     update = select_discriminative_symptom(s)
+    # 第一条被丢弃,剩 2 条
+    assert len(update["followup_questions"]) == 2
+    assert update["followup_questions"][0] == {"type": "slot", "slot": "trigger"}
+    assert update["followup_questions"][1] == {"type": "open"}
 
-    fq = update["followup_questions"]
-    assert all(q["type"] == "symptom" for q in fq)
-    # 没有维度选择调用 → invoke 总数 == 症状数(每个跑可问性评估)
-    assert mock_chain.invoke.call_count == 2
 
-
-@patch("src.agent.nodes.select_symptom.get_embedding_model")
 @patch("src.agent.nodes.select_symptom.get_llm")
-def test_report_positive_findings_consume_symptom(mock_llm, mock_embed):
-    """positive_findings 命中 → 症状直接入 confirmed,不出现在 followup_questions。"""
+def test_llm_failure_falls_back_to_empty(mock_llm):
+    """LLM 失败 → 兜底空 followup,不抛异常(中安全等级失败处理)。"""
     from src.agent.nodes.select_symptom import select_discriminative_symptom
 
-    mock_embed.return_value.encode.return_value = []
     mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
-    mock_chain.invoke.side_effect = [
-        DimensionSelection(selected_slots=["trigger"]),
-        AskabilityJudgment(askable=True, reason="ok"),
-    ]
+    mock_chain.invoke.side_effect = ValueError("schema rejected")
 
-    s = _state(
-        extracted=[
-            {"text": "白细胞升高", "preferred_term": "白细胞升高", "linked": True},
-            {"text": "反酸", "preferred_term": "反酸", "linked": True},
-        ],
-        report_findings=[
-            {"report_type": "blood_routine", "positive_findings": ["白细胞升高"]}
-        ],
-    )
+    s = _state_with_chief()
     update = select_discriminative_symptom(s)
-
-    assert "白细胞升高" in update["confirmed_symptoms"]
-    # 不应再追问"白细胞升高"
-    sympts = [q.get("term") for q in update["followup_questions"] if q.get("type") == "symptom"]
-    assert "白细胞升高" not in sympts
+    assert update["followup_questions"] == []
 
 
-@patch("src.agent.nodes.select_symptom.get_embedding_model")
 @patch("src.agent.nodes.select_symptom.get_llm")
-def test_already_asked_filtered(mock_llm, mock_embed):
-    """已 confirmed 的症状不再追问。"""
+def test_questions_capped_at_max(mock_llm):
+    """LLM 返回超 quota 的 questions → 截到 MAX_FOLLOWUP_QUESTIONS。"""
+    from config.settings import settings
     from src.agent.nodes.select_symptom import select_discriminative_symptom
-    from src.agent.state import PresentIllnessSlots
 
-    mock_embed.return_value.encode.return_value = []
+    K = settings.agent_limits.MAX_FOLLOWUP_QUESTIONS
+    # 构造 K+2 个有效条目(LLM schema 已经 max_length=5,这里测兜底截断)
+    # SmartFollowupOutput 自身 max_length=5,所以直接用 K 条就够
     mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
-    mock_chain.invoke.side_effect = [
-        AskabilityJudgment(askable=True, reason="ok"),
-    ]
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot=f"slot_{i}") for i in range(K)]
+    )
 
-    full_slots = PresentIllnessSlots(
-        onset_time="x", onset_mode="x", trigger="x", location="x", nature="x",
-        severity="x", duration_pattern="x", progression="x",
-        treatment_tried="x", treatment_response="x",
-        aggravating=["x"], relieving=["x"], associated_symptoms=["x"],
-    )
-    s = _state(
-        extracted=[
-            {"text": "反酸", "preferred_term": "反酸", "linked": True},
-            {"text": "烧心", "preferred_term": "烧心", "linked": True},
-        ],
-        confirmed_symptoms=["反酸"],
-    )
-    s.present_illness_slots = full_slots
+    s = _state_with_chief()
     update = select_discriminative_symptom(s)
-
-    sympts = [q["term"] for q in update["followup_questions"] if q["type"] == "symptom"]
-    assert "反酸" not in sympts  # 已 confirmed,被过滤
-    assert "烧心" in sympts
+    assert len(update["followup_questions"]) <= K

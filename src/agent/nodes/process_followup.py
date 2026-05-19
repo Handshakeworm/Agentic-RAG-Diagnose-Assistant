@@ -1,7 +1,10 @@
 """src/agent/nodes/process_followup.py — Agent ⑦ process_followup_answer(DEV_SPEC §4.1.2 ⑦)。
 
-LLM 解析患者回答 → 症状级回答分流(confirmed/denied/uncertain)+ 维度级槽位回填
-+ 新症状提取。followup_round += 1 后回到 build_query 复跑流水线。
+LLM 解析患者回答 → 维度级槽位回填 + 新症状提取。followup_round += 1 后回到
+build_query 复跑流水线。
+
+⑤ 已重设计为只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"分支 —
+开放式追问得到的新症状统一进 `new_symptoms` 字段,本节点直接 append 到 confirmed_symptoms。
 
 中安全等级:失败 → 抛异常终止会话(回答未解析将导致信息丢失,不能静默)。
 """
@@ -108,19 +111,9 @@ def process_followup_answer(state: MedicalState) -> dict:
     confirmed = list(state.confirmed_symptoms)
     denied = list(state.denied_symptoms)
     uncertain = list(state.uncertain_symptoms)
-    for r in result.symptom_responses:
-        term = r.term
-        if r.status == "confirmed" and term not in confirmed:
-            confirmed.append(term)
-        elif r.status == "denied" and term not in denied:
-            denied.append(term)
-        elif r.status == "uncertain" and term not in uncertain:
-            uncertain.append(term)
-        # "unanswered" 不更新任何列表,留给后续轮按需再问
 
-    # spec §4.1.2 ⑦:消费 result.new_symptoms — 患者回答里顺带提到的新症状直接补进
-    # confirmed_symptoms,供下轮 build_query NER + 召回链路使用。已在 confirmed/denied/
-    # uncertain 任一列表中的术语跳过(以已有状态为准,LLM 抽出的"新"实际可能重复)
+    # spec §4.1.2 ⑦:开放式追问的新症状 + 患者顺带补充的副症状,统一进 confirmed_symptoms。
+    # ⑤ 已重设计为只产 slot / open 两类追问,无 yes/no 症状级分流。
     already_known = set(confirmed) | set(denied) | set(uncertain)
     for term in result.new_symptoms:
         if term and term not in already_known:

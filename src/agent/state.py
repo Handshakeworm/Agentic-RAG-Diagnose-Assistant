@@ -81,9 +81,9 @@ class SessionLatencyMs(BaseModel):
 class MedicalState(BaseModel):
     """LangGraph 共享状态。字段语义见 DEV_SPEC §4.1.1。
 
-    注:`diagnosis_result` / `report_findings` / `standardized_entities` 等 inner
-    item 仍用 `list[dict]` 表示,待 §9.5 对应 Pydantic schema 实现后(F4-F10 阶段)
-    升级为 `list[RankedDisease]` / `list[ReportFinding]` 等强类型。
+    注:`diagnosis_result` / `report_findings` 等 inner item 仍用 `list[dict]` 表示,
+    待 §9.5 对应 Pydantic schema 实现后(F4-F10 阶段)升级为 `list[RankedDisease]` /
+    `list[ReportFinding]` 等强类型。
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)  # BaseMessage 不是 Pydantic 类型
@@ -100,9 +100,6 @@ class MedicalState(BaseModel):
     medical_history: dict = Field(default_factory=dict)
     exam_reports: list[dict] = Field(default_factory=list)
     report_findings: list[dict] = Field(default_factory=list)
-
-    # === 术语标准化 ===
-    standardized_entities: list[dict] = Field(default_factory=list)
 
     # === 召回与候选 ===
     dense_query: str = ""

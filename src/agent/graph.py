@@ -1,9 +1,9 @@
 """src/agent/graph.py — Agent LangGraph StateGraph 编排(DEV_SPEC §4.1.4)。
 
-注册 16 节点 + 2 条件边,顺序与 4.1.3 流程图严格一致:
+注册 15 节点 + 2 条件边,顺序与 4.1.3 流程图严格一致:
 
   ① info_collect → ①.5 analyze_initial_reports → ② build_query → ③ retrieve →
-  ④ extract_symptoms → ⑤ select_discriminative_symptom →
+  ⑤ select_discriminative_symptom →
     ┌─[should_continue 路由]─┐
     │  followup → ⑥a generate_followup → ⑥b wait_followup_answer (interrupt) →
     │             ⑦ process_followup_answer → ② build_query (loop)
@@ -12,6 +12,9 @@
        │  recommend_exam → ⑧a recommend_exam → ⑧b wait_exam_report (interrupt) →
        │                   ⑨ process_exam_result → ② build_query (loop)
        └─ safety_gate → ⑪ safety_gate → ⑫ generate_advice → ⑬ format_response → END
+
+注:④ extract_symptoms 节点已删除 — ⑤ 重设计为 1 LLM 直接从 state 选追问
+(空 slot 维度填补 + 开放式症状兜底),不再依赖 ④ 抽出来的关键词。
 
 `build_graph()` 返回未编译的 StateGraph(便于测试时注入 checkpointer);
 `build_app()` 返回编译后的可执行 app(默认 InMemorySaver,interrupt 需要 checkpointer)。
@@ -24,7 +27,6 @@ from langgraph.graph import END, StateGraph
 from src.agent.nodes.analyze_initial_reports import analyze_initial_reports
 from src.agent.nodes.build_query import build_query
 from src.agent.nodes.diagnose import diagnose
-from src.agent.nodes.extract_symptoms import extract_symptoms
 from src.agent.nodes.format_response import format_response
 from src.agent.nodes.generate_advice import generate_advice
 from src.agent.nodes.generate_followup import generate_followup
@@ -46,12 +48,11 @@ def build_graph() -> StateGraph:
     """构造未编译的 StateGraph(测试 / 调试用)。"""
     workflow = StateGraph(MedicalState)
 
-    # 16 节点
+    # 15 节点(原 16 节点,④ extract_symptoms 已删)
     workflow.add_node("info_collect", info_collect)
     workflow.add_node("analyze_initial_reports", analyze_initial_reports)
     workflow.add_node("build_query", build_query)
     workflow.add_node("retrieve", retrieve)
-    workflow.add_node("extract_symptoms", extract_symptoms)
     workflow.add_node("select_discriminative_symptom", select_discriminative_symptom)
     workflow.add_node("generate_followup", generate_followup)
     workflow.add_node("wait_followup_answer", wait_followup_answer)
@@ -67,12 +68,11 @@ def build_graph() -> StateGraph:
     # 入口
     workflow.set_entry_point("info_collect")
 
-    # 顺序边 ①→①.5→②→③→④→⑤
+    # 顺序边 ①→①.5→②→③→⑤(④ 已删)
     workflow.add_edge("info_collect", "analyze_initial_reports")
     workflow.add_edge("analyze_initial_reports", "build_query")
     workflow.add_edge("build_query", "retrieve")
-    workflow.add_edge("retrieve", "extract_symptoms")
-    workflow.add_edge("extract_symptoms", "select_discriminative_symptom")
+    workflow.add_edge("retrieve", "select_discriminative_symptom")
 
     # 条件边:⑤ → 追问 / 诊断
     workflow.add_conditional_edges(

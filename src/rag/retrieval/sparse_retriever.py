@@ -25,8 +25,8 @@ def search_sparse_routes(
     """对 `sparse_queries` 中每个症状维度词袋分别跑 BM25,返回 N 路候选。
 
     Args:
-        sparse_queries: ② build_query 产出的 list[str],每项一个非空有效词袋
-            (空词袋已由 query_processing.build_sparse_queries 过滤,本函数不做
+        sparse_queries: ② build_query Step 2 产出的 list[str],每项一个非空有效词袋
+            (空词袋已由 build_query Step 2 长度 ≥ 2 + 保序去重过滤,本函数不做
             truthy 兜底,空入入直接返 [])
         top_k: 每路返回 Top-K 候选数。None 时取 `settings.agent_limits.RETRIEVE_TOP_N`
         source_id_filter: 可选 pre-filter,按来源文档过滤(对接 E6 元数据过滤策略)

@@ -583,7 +583,7 @@ exam_reports (
 
 ### 2.4.6. 术语向量库：Milvus（terms_collection）
 
-`terms_collection` 是独立于医学文献向量库（2.4.1）的专用术语检索库，服务于节点 ② build_query 的 Entity Linking 和 3.2.1 的术语扩展，两者均直接复用本库，不重复调用 LLM。
+`terms_collection` 是独立于医学文献向量库(2.4.1)的专用术语检索库,**EL 移除后运行时不再被查询**(原服务的 ② build_query Entity Linking + 3.2.1 术语扩展两路均已下线,见 §4.1.6.2)。数据资产保留(40k+ ICD-10-CN alias 向量)作为未来重新启用 EL 或切换到 EL_DESIGN_REVIEW §11.6 方案 A/B 时的基础;`src/db/milvus/terms_collection.py` DAL 模块、`terms/build_icd10.py` 灌库脚本继续存在但运行时不 import。
 
 **数据来源（三层叠加，优先级从高到低）**：
 

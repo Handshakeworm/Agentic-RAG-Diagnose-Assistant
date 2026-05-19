@@ -138,10 +138,10 @@ def build_query_construction_prompt(
     report_impressions: list[str],
     filled_slots: dict[str, Any],
 ) -> str:
-    """② build_query Step 4:LLM 改写 dense_query(单字段输出)。
+    """② build_query Step 3:LLM 改写 dense_query(单字段输出)。
 
-    Sparse 路词袋由 `query_processing.build_sparse_queries` 确定性产出,
-    完全不进 LLM 视野;LLM 只负责整合证据成一句语义连贯的 dense 查询。
+    Sparse 路词袋由 Step 2 state 多字段直采(chief + slots + report findings)确定性
+    产出,完全不进 LLM 视野;LLM 只负责整合证据成一句语义连贯的 dense 查询。
     """
     slots_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
     slots_block = "\n".join(slots_lines) if slots_lines else "  (无)"
@@ -178,41 +178,71 @@ def build_query_construction_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑤ select_discriminative_symptom — 维度选择 + 可问性评估
+# ⑤ select_discriminative_symptom — Smart followup(1 LLM)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def build_dimension_selection_prompt(
+def build_smart_followup_prompt(
     chief_complaint: str,
+    present_illness: str,
+    filled_slots: dict,
     empty_slots: list[str],
-    candidate_diseases_preview: list[str],
+    confirmed_symptoms: list[str],
+    denied_symptoms: list[str],
+    uncertain_symptoms: list[str],
     quota: int,
 ) -> str:
-    """⑤ 维度缺口优先 — 从空槽中选 1~2 个最有鉴别价值的维度。"""
-    slots_block = ", ".join(empty_slots) or "(无)"
-    diseases_block = "、".join(candidate_diseases_preview[:8]) or "(尚未召回)"
-    return f"""你是临床问诊助手。患者主诉是"{chief_complaint}",目前候选疾病大致包括:{diseases_block}。
-现病史的以下维度槽位仍为空:[{slots_block}]。
+    """⑤ 1 次 LLM 同时出 questions(追问) + unaskable_symptoms(粗筛)。"""
+    filled_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
+    filled_block = "\n".join(filled_lines) if filled_lines else "  (无,全部空缺)"
+    empty_block = ", ".join(empty_slots) or "(无,13 维已全部填满)"
+    conf_block = "、".join(confirmed_symptoms) or "(无)"
+    den_block = "、".join(denied_symptoms) or "(无)"
+    unc_block = "、".join(uncertain_symptoms) or "(无)"
 
-请从空槽中选出**最多 {quota} 个**对当前候选疾病鉴别**最有价值**的维度名(填到 selected_slots)。
+    return f"""你是临床问诊助手。请基于患者已提供的信息,同时产出本轮**追问项** + **想知道但患者答不上的体征**。
 
-判断原则:
-- 选能把候选疾病一分为二的维度。例如鉴别胆囊炎 vs 胃溃疡,"trigger"(诱因)和
-  "aggravating"(加重因素)信息量高
-- 不要选那些已在 chief_complaint 里隐含的维度
-- 维度名必须是空槽列表中的原文,不要拼写或翻译""" + _JSON_TAIL
+【患者主诉】{chief_complaint or "(无)"}
+【现病史描述】{present_illness or "(无)"}
 
+【已填的 HPI 维度】
+{filled_block}
 
-def build_askability_prompt(symptom: str) -> str:
-    """⑤ 贪心循环内 — 单症状可问性评估。"""
-    return f"""你是临床问诊助手。请判断症状"{symptom}"是否适合**直接向普通患者**追问。
+【空缺的 HPI 维度】(13 维框架内尚未问到的)
+{empty_block}
 
-判断标准:
-- 可问(askable=true):患者能感知并回答的主观体验,如"反酸"、"胸闷"、"夜间盗汗"
-- 不可问(askable=false):需要医生体格检查或辅助检查才能确认的体征/检验,如
-  "Murphy 征阳性"、"肝浊音界缩小"、"白细胞升高"、"心包摩擦音"
+【已确认有的症状】{conf_block}
+【已否认的症状】{den_block}
+【已问但患者不确定的】{unc_block}
 
-reason 字段简短说明判断理由(≤ 30 字)。""" + _JSON_TAIL
+【任务 1:questions — 本轮追问项,0-{quota} 条】
+从下面两种 type 里选,**最多 {quota} 条,可以 0 条**(信息已足时直接返空,流程跳诊断):
+
+1. **type="slot"** — 补全 HPI 空缺维度
+   - 优先从【空缺维度】里挑对当前主诉**诊断价值最高**的(通常是 trigger/location/
+     nature/duration_pattern/aggravating/relieving 这类患者能直接答的维度)
+   - 把 slot 名(如 "trigger" / "location")写到 `slot` 字段
+   - 不要选已填的;不要重复
+
+2. **type="open"** — 开放式问"还有别的不舒服吗?"
+   - 适合用在:13 维已大部分填满 / 空缺维度都不重要 / 想兜底捕获遗漏症状
+   - 一轮**最多 1 条** open(再多无意义,患者也想不出更多)
+   - `slot` 字段留 None
+
+【任务 2:unaskable_symptoms — 想知道但患者答不上的体征/指标,0-{quota} 条】
+**最多 {quota} 条,可以 0 条**。每条带:
+- `description`:医生侧语言,写"想查什么 / 想知道什么体征",如"腹部 B 超提示有无胆囊壁
+  增厚"、"血常规白细胞与中性粒细胞分类"
+- `reason`:为什么对鉴别诊断重要,如"关键鉴别胆囊炎 vs 胃炎"
+
+这些是患者**无法靠口述回答**但医生靠经验知道"应该查一下"的项。**不要**把可问的症状写进来
+(那应该走 questions / open),也**不要**直接写检查名(那是 ⑧ recommend_exam 的事)。
+
+【判断原则】
+- 两个任务**互斥**:已确认/否认/不确定的症状不要重问(open 里也不问);可问的维度走 questions,
+  不要塞 unaskable
+- 信息已足时,questions 和 unaskable 都可以返空,让流程尽快进诊断 — 不要为问而问
+- 总数:questions ≤ {quota},unaskable ≤ {quota}(独立各自计数)""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -226,13 +256,13 @@ def build_followup_question_prompt(
     confirmed_symptoms: list[str],
     denied_symptoms: list[str],
 ) -> str:
-    """⑥a 生成混合类型(维度级 + 症状级)追问问题,患者口语风格。"""
+    """⑥a 生成两种 type(slot 维度填补 + open 开放式)追问问题,患者口语风格。"""
     items = []
     for q in questions:
-        if q.get("type") == "dimension":
-            items.append(f"  - 维度问题:补全 {q['slot']} 这个维度")
-        elif q.get("type") == "symptom":
-            items.append(f"  - 症状问题:确认是否有 {q['term']}")
+        if q.get("type") == "slot":
+            items.append(f"  - 补全 HPI 维度:{q['slot']}")
+        elif q.get("type") == "open":
+            items.append("  - 开放式问:还有没有别的地方不舒服")
     items_block = "\n".join(items) if items else "  (无)"
 
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
@@ -250,8 +280,9 @@ def build_followup_question_prompt(
 
 输出要求:
 - 直接给问题文本,不要前缀"请问"反复出现
-- 维度问题:用问"是什么情况下/怎样的/最近有没有变化"等口语表达,不要直接说"诱因/性质"
-  这类术语
+- 维度补全(slot):用"是什么情况下/怎样的/最近有没有变化"等口语表达,不要直接说"诱因/性质"
+  这类医学术语
+- 开放式追问(open):自然问"除了上面说的,还有没有别的地方不舒服?" — 用于兜底捕获遗漏症状
 - 控制在 2-3 句以内
 - 涉及隐私/心理症状要用委婉表达"""
 
@@ -266,16 +297,16 @@ def build_followup_parse_prompt(
     followup_answer: str,
     questions: list[dict],
 ) -> str:
-    """⑦ 解析患者回答 → 症状状态分流 + 维度槽位回填 + 新症状提取。"""
+    """⑦ 解析患者回答 → 维度槽位回填 + 新症状提取。"""
     items_lines = []
     for q in questions:
-        if q.get("type") == "dimension":
-            items_lines.append(f"  - 维度槽位 {q['slot']}(回填到 slot_fills)")
-        elif q.get("type") == "symptom":
-            items_lines.append(f"  - 症状 {q['term']}(回填到 symptom_responses)")
+        if q.get("type") == "slot":
+            items_lines.append(f"  - 补全 HPI 维度 {q['slot']}(回填到 slot_fills)")
+        elif q.get("type") == "open":
+            items_lines.append("  - 开放式问『还有别的不舒服』(新症状回填到 new_symptoms)")
     items_block = "\n".join(items_lines) if items_lines else "  (无)"
 
-    return f"""你是问诊回答解析助手。请按以下规则把患者回答结构化。
+    return f"""你是问诊回答解析助手。请把患者回答结构化。
 
 【追问问题】
 {followup_question}
@@ -287,18 +318,15 @@ def build_followup_parse_prompt(
 {followup_answer}
 
 【解析规则】
-1. 症状级回答(symptom_responses,每项 term=症状标准术语,status 取值):
-   - confirmed:患者明确表示有
-   - denied:患者明确表示没有
-   - uncertain:患者明确表示不知道/不确定
-   - unanswered:患者回答里完全没涉及该症状(不要硬猜)
-2. 维度级回填(slot_fills,key=槽位名):
+1. 维度级回填(slot_fills,key=槽位名):
    - 单值槽(onset_time/onset_mode/trigger/location/nature/severity/
      duration_pattern/progression/treatment_tried/treatment_response):value=str
    - 多值槽(aggravating/relieving/associated_symptoms):value=list[str]
-3. new_symptoms:患者回答里**主动提到的、本轮未问到的新症状**;若无则空列表
-
-槽位名必须与本轮待回答项中的 slot 完全一致,不要新造槽名。""" + _JSON_TAIL
+   - 槽位名必须是 HPI 13 维之一,不要新造槽名;患者没涉及的槽位**不要**出现在 slot_fills 里
+2. new_symptoms:患者回答里**主动提到的症状**(无论是开放式问的回答,还是顺带补充);
+   - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛"、"夜间盗汗")
+   - 若回答只涉及维度填补、未提及任何新症状,则为空列表
+   - 已确认 / 已否认 / 不确定列表中的术语**不要**重复输出""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -314,7 +342,8 @@ def build_recommend_exam_prompt(
 ) -> str:
     """⑧a recommend_exam(自由文本):基于诊断结果 + 不可问体征推断需要的检查。
 
-    输出文本由调用方解析后填到 `recommended_tests`(list[str])。
+    `unaskable_symptoms` 是 ⑩ Step 3 精筛过的版本(`{description, reason}` 结构),
+    可直接据 description 拟检查建议。
     """
     diag_lines = [
         f"  - {r.get('disease')} (p={r.get('probability', 0):.2f}, type={r.get('differentiation_type')})"
@@ -323,7 +352,7 @@ def build_recommend_exam_prompt(
     diag_block = "\n".join(diag_lines) or "  (无诊断结果)"
 
     unaskable_lines = [
-        f"  - {u.get('preferred_term')} (info_gain={u.get('info_gain', 0):.2f})"
+        f"  - {u.get('description')} —— {u.get('reason')}"
         for u in unaskable_symptoms[:8]
     ]
     unaskable_block = "\n".join(unaskable_lines) or "  (无)"
@@ -365,84 +394,109 @@ def build_recommend_exam_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ⑩ diagnose 三步 prompt
+# ⑩ diagnose 1 步 prompt(对齐评测口径 .eval/rag_eval/run_diagnose_eval.py)
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def build_evidence_assembly_prompt(
+def build_diagnose_prompt(
     *,
     parent_texts: list[str],
     figures: list[dict],
-    vector_hints: list[str],
+    chief_complaint: str,
+    present_illness: str,
     confirmed_symptoms: list[str],
     denied_symptoms: list[str],
+    uncertain_symptoms: list[str],
     slots: dict[str, Any],
     history_summary: str,
     report_findings: list[dict],
+    unaskable_symptoms: list[dict],
 ) -> tuple[list[BaseMessage], str]:
-    """⑩ Step 1(spec §3.2.3 + §9.3 vision LLM 行):证据归集 EvidenceSheet,**不做概率判断**。
+    """⑩ diagnose 1 步 LLM prompt(多模态,对齐评测口径 .eval/rag_eval/run_diagnose_eval.py)。
 
     返回多模态 messages + 纯文本 prompt(后者供 §9.6 final_prompt 审计存档)。
     figure 的 image_data_uri 作为 image_url 消息块附加;medical_statement 已在
     context builder 中排除,**不进 prompt**(spec §3.1.5.1 + §3.2.3 关键认知)。
 
     Args:
-        parent_texts: 规则 1/2 展开后的父块文本列表(与 reranked_chunks 同序)
-        figures: 规则 2/3 去重后的图表 chunk 列表,每条含 chunk_raw_text + image_data_uri
-        vector_hints: 规则 4 vector_hits matched_text(已去重 + 已与父块原文去重)
-        confirmed_symptoms / denied_symptoms / slots / history_summary / report_findings:
-            患者多维度证据
+        parent_texts: Step 0.5 父块扩展后的文本列表(与 reranked_chunks 同序)
+        figures: Step 0.5 去重后的图表 chunk 列表,每条含 chunk_raw_text + image_data_uri
+        chief_complaint / present_illness: 患者叙事(原文)
+        confirmed_symptoms / denied_symptoms / uncertain_symptoms / slots /
+            history_summary / report_findings: 多轮 followup 累积的患者画像
+        unaskable_symptoms: ⑤ 写入的粗筛版({description, reason}),供 LLM 产 retained_unaskable
     """
-    chunks_block = "\n".join(
-        f"[chunk {i}] {(c or '')[:300]}" for i, c in enumerate(parent_texts[:8])
-    ) or "(无)"
+    # 父块文本:对齐评测口径,不截断(LLM 1M context,信息全给)
+    parents_block = "\n\n".join(
+        f"[文本块 {i+1}]\n{(c or '')}" for i, c in enumerate(parent_texts)
+    ) or "(无召回)"
 
-    # 图表块:仅放文本(table=html / figure=caption + footnote);截图走多模态消息单独附加
     if figures:
-        figures_block = "\n".join(
-            f"[figure {i} | {f['chunk_type']}] {(f.get('chunk_raw_text') or '')[:300]}"
+        figures_caption_block = "【召回 figure 截图(随附图像消息块,按下面顺序看)】\n" + "\n".join(
+            f"[figure {i+1} | {f.get('chunk_type')}] {(f.get('chunk_raw_text') or '')[:300]}"
             for i, f in enumerate(figures)
         )
     else:
-        figures_block = "(无)"
-
-    hints_block = "\n".join(f"- {h[:200]}" for h in vector_hints[:8]) or "(无)"
+        figures_caption_block = "【召回 figure 截图】(无)"
 
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
     denied_block = "、".join(denied_symptoms) or "(无)"
-    slots_block = json.dumps(
-        {k: v for k, v in slots.items() if v}, ensure_ascii=False
-    )
+    uncertain_block = "、".join(uncertain_symptoms) or "(无)"
+    slots_block = json.dumps({k: v for k, v in slots.items() if v}, ensure_ascii=False)
     reports_block = json.dumps(report_findings[:5], ensure_ascii=False)[:1500]
+    unaskable_block = json.dumps(unaskable_symptoms[:8], ensure_ascii=False) if unaskable_symptoms else "[]"
 
-    prompt_text = f"""你是医学证据归集助手。请从下面的医学文献片段 + 患者证据中,**只做事实级别的证据归集**——
-列出每个候选疾病的支持/反对证据,但**不要做概率判断**(那是 Step 2 的事)。
+    prompt_text = f"""你是临床鉴别诊断助手。基于以下患者信息 + 检索召回的医学文献(含父块全文 + table HTML
++ 可选 figure 截图),做鉴别诊断并按概率降序输出候选疾病。
 
-【医学文献片段(精排父块,Top-K)】
-{chunks_block}
+【患者主诉】
+{chief_complaint or "(无)"}
 
-【同节图表 chunk(table 见 html / figure 见随附截图)】
-{figures_block}
+【现病史原文】
+{present_illness or "(无)"}
 
-【召回线索(matched_text,辅助判断 chunk 被召回的语义焦点;非权威医学事实)】
-{hints_block}
+【现病史结构化维度】
+{slots_block}
 
-【患者已确认症状】{confirmed_block}
-【患者已否认症状】{denied_block}
-【现病史已填维度】{slots_block}
-【病史摘要】{history_summary or "(无)"}
-【检查报告发现】{reports_block}
+【多轮交互累积的患者画像】
+- 已确认症状:{confirmed_block}
+- 已否认症状:{denied_block}
+- 已问但不确定的症状:{uncertain_block}
 
-【输出 EvidenceSheet.candidates,每个候选包含】
-- disease:候选疾病名
-- supporting:支持证据(症状匹配 / 图表数据 / 检查报告 / 病史)
-- opposing:反对证据(否认症状/阴性发现)
-- history_factors:每项 {{item, direction(increase/decrease/neutral)}}
-- slot_relevance:每项 {{slot, value, impact}}(现病史维度对该候选的诊断意义)
-- report_evidence:每项 {{finding, role(quantitative_support/qualitative_support/exclusion)}}
+【病史摘要】
+{history_summary or "(无)"}
 
-至少给出 1 个候选;若文献片段都不相关,也要给一个候选(disease="待进一步评估"),
-supporting/opposing 留空,后续 Step 2 会判定为 insufficient。""" + _JSON_TAIL
+【检查报告发现】
+{reports_block}
+
+【⑤ 写入的 unaskable 粗筛(LLM 想知道但患者答不上的体征,供 retained_unaskable 精筛参考)】
+{unaskable_block}
+
+【医学文献文本(RAG 召回 Top-{len(parent_texts)} 父块 + table HTML,按相关性顺序)】
+{parents_block}
+
+{figures_caption_block}
+
+【任务】
+1. 列出候选疾病(至少 1 个,通常 1-5 个),按 probability 降序输出
+2. 每个候选给出:
+   - disease:疾病名(精确到部位/分型,如 "右额颞急性硬膜外血肿" 而非 "颅内血肿")
+   - probability:0~1 的概率(每个候选独立估算,不需归一)
+   - evidence:3-5 条关键支持证据(可引用症状/报告/文献/图像)
+   - differentiation:与其他相似疾病的鉴别要点(可空)
+   - differentiation_type(必出):
+     * `confirmed` — top1 概率 ≥ 0.6 且证据闭环
+     * `need_exam` — top1 概率 0.3-0.6,或多个候选概率接近(差距 < 0.1),鉴别依赖检查体征
+     * `insufficient` — top1 概率 < 0.3,或候选分散证据不足支持任何高概率判断
+     * **top1 决定后续路由**:`need_exam` → 走 ⑧ recommend_exam;其他 → 走 ⑪ safety_gate;
+       top2/top3 沿用 top1 的值即可(router 只看 top1)
+   - failure_reason:**保持 null**(由节点代码在兜底路径填,不在 LLM 职责范围)
+3. retained_unaskable(基于诊断结果挑/改写,从【⑤ 写入的 unaskable 粗筛】里精筛):
+   - top1=`confirmed` → 通常返空列表(证据已闭环,无需再查)
+   - top1=`insufficient` → 通常返空列表(检查也救不回信息不足)
+   - top1=`need_exam` → **至少保留 1 条**,只留对当前 top 候选鉴别真正关键的;描述可改写
+     得更聚焦,如把"想知道胆囊有无问题"改成"腹部 B 超确认胆囊壁厚度 + 有无结石"
+   - **宁可少留不可多留** — 不该查的留下来会被 ⑧a 直接推给患者""" + _JSON_TAIL
 
     # 多模态消息组装:base text + 每张可加载的 figure 截图作 image_url 块
     content: list[dict] = [{"type": "text", "text": prompt_text}]
@@ -458,68 +512,6 @@ supporting/opposing 留空,后续 Step 2 会判定为 insufficient。""" + _JSON
         messages = [HumanMessage(content=content)]
 
     return messages, prompt_text
-
-
-def build_diagnosis_ranking_prompt(
-    evidence_sheet_json: str,
-    unaskable_symptoms: list[dict],
-) -> str:
-    """⑩ Step 2:基于 EvidenceSheet 做鉴别诊断排序 + unaskable 条件推理。"""
-    unaskable_block = json.dumps(unaskable_symptoms[:8], ensure_ascii=False)
-    return f"""你是临床鉴别诊断助手。基于已经归集好的证据表 + 高增益但患者无法自答的体征,
-做鉴别诊断排序。
-
-【EvidenceSheet(Step 1 输出)】
-{evidence_sheet_json}
-
-【需检查鉴别的体征】
-{unaskable_block}
-
-【排序规则】
-- 按概率降序输出,所有候选概率之和不必等于 1(每个独立判断)
-- 客观检查证据权重 > 主观症状描述
-- 病史作为先验概率调节器逐项归因
-- 对每个候选,差异 evidence_chain 写 3-5 条关键推理理由
-
-【differentiation_type 选择】
-- "confirmed":top1 概率显著领先(≥ 0.6)且证据闭环
-- "need_exam":多个候选概率接近,鉴别关键依赖 unaskable 体征/检查 → 在 unaskable_impact
-  里说明"做了 X 检查能区分 Y 与 Z"
-- "insufficient":候选分散、证据不足以支持任何高概率判断
-
-输出 DiagnosisRanking.ranked,**每项的 failure_reason 字段保持 null**(由节点代码兜底填写,
-不在 LLM 职责范围)。""" + _JSON_TAIL
-
-
-def build_diagnosis_calibration_prompt(
-    ranking_json: str,
-    confirmed_symptoms: list[str],
-    denied_symptoms: list[str],
-    report_findings: list[dict],
-) -> str:
-    """⑩ Step 3:置信度校准 + 事实核查 + 标签校准。"""
-    confirmed_block = "、".join(confirmed_symptoms) or "(无)"
-    denied_block = "、".join(denied_symptoms) or "(无)"
-    reports_block = json.dumps(report_findings[:5], ensure_ascii=False)[:1500]
-
-    return f"""你是诊断结果质检助手。请对 Step 2 的排序结果做**事实核查 + 概率校准 + 标签校准**,
-直接输出修正后的结果。
-
-【Step 2 输出(待校准)】
-{ranking_json}
-
-【原始事实(用于交叉验证)】
-- 患者已确认症状:{confirmed_block}
-- 患者已否认症状:{denied_block}
-- 检查报告:{reports_block}
-
-【三类校准】
-1. 事实核查:Step 2 引用的 evidence_chain 是否与原始事实矛盾?有矛盾的删/改
-2. 概率校准:top1 与 top2 差距是否合理?如 top1=0.95 但 top2=0.93 应拉大或拉小
-3. 标签校准:differentiation_type 与概率是否匹配?(如 top1=0.35 不应标 confirmed,
-   应改 need_exam 或 insufficient)
-
-输出 DiagnosisOutput.results,**每项的 failure_reason 字段保持 null**。""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────

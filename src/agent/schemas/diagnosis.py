@@ -1,13 +1,12 @@
-"""Agent ⑩ diagnose 三步 LLM 输出 schema(DEV_SPEC §9.5 第 8 项)。
+"""Agent ⑩ diagnose 1 步 LLM 输出 schema(DEV_SPEC §9.5 第 8 项)。
 
-三步分阶段推理(spec §4.1.2 ⑩):
-- Step 1 → `EvidenceSheet`(证据归集,事实级别,不做概率判断)
-- Step 2 → `DiagnosisRanking`(鉴别诊断排序,核心临床推理)
-- Step 3 → `DiagnosisOutput`(置信度校准,自检纠偏后的最终结果)
+⑩ 重设计:3 步链 → 1 步(对齐评测口径 `.eval/rag_eval/run_diagnose_eval.py`)。
+评测脚本一步 LLM + 信息全给已经能拿到 top1 93.5% / top3 100%,3 步链的证据归集 +
+排序 + 校准是过度工程化,延迟显著(评测平均 2 分钟,3 步链会到 4-6 分钟)。改 1 步:
+LLM 同时输出诊断排序 + retained_unaskable 精筛。
 
-`RankedDisease.failure_reason` 字段由**节点代码**在兜底路径中填充
-(spec §4.1.2 ⑩ "结构化输出保障"段),**不由 LLM 输出**——schema 给 None 默认值,
-LLM 正常路径下产出 `failure_reason=None`,异常兜底时由 except 块构造。
+`RankedDisease.failure_reason` 由**节点代码**在兜底路径填充(spec §4.1.2 ⑩),
+不由 LLM 输出。LLM 正常路径 failure_reason=None,异常兜底由 except 块构造。
 """
 from __future__ import annotations
 
@@ -15,108 +14,58 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Step 1: EvidenceSheet — 证据归集
-# ────────────────────────────────────────────────────────────────────────────
-
-
-class HistoryFactor(BaseModel):
-    """单项病史因素及其对候选疾病概率的影响方向。"""
-
-    item: str = Field(..., description="病史项目,如'高血压病史'")
-    direction: Literal["increase", "decrease", "neutral"] = Field(
-        ..., description="对候选疾病概率的影响:升高/降低/中性"
-    )
-
-
-class SlotRelevance(BaseModel):
-    """单个现病史维度槽位与候选疾病的相关性。"""
-
-    slot: str = Field(..., description="槽位名,如'location'")
-    value: str = Field(..., description="槽位值,如'右下腹'")
-    impact: str = Field(..., description="对候选疾病的诊断意义,如'右下腹痛支持阑尾炎'")
-
-
-class ReportEvidence(BaseModel):
-    """单条报告发现作为诊断证据的角色。"""
-
-    finding: str = Field(..., description="报告中的具体发现,如'WBC 12.3×10⁹/L↑'")
-    role: Literal["quantitative_support", "qualitative_support", "exclusion"] = Field(
-        ..., description="证据角色:定量支持/定性支持/排除"
-    )
-
-
-class CandidateEvidence(BaseModel):
-    """单个候选疾病的证据归集。"""
-
-    disease: str = Field(..., description="候选疾病名")
-    supporting: list[str] = Field(default_factory=list, description="支持证据(症状匹配)")
-    opposing: list[str] = Field(
-        default_factory=list, description="反对证据(否认症状/阴性发现)"
-    )
-    history_factors: list[HistoryFactor] = Field(
-        default_factory=list, description="病史因素列表"
-    )
-    slot_relevance: list[SlotRelevance] = Field(
-        default_factory=list, description="现病史维度槽位相关性列表"
-    )
-    report_evidence: list[ReportEvidence] = Field(
-        default_factory=list, description="报告证据列表"
-    )
-
-
-class EvidenceSheet(BaseModel):
-    """⑩ diagnose Step 1 输出 — 结构化证据表。"""
-
-    candidates: list[CandidateEvidence] = Field(
-        ..., min_length=1, description="候选疾病证据列表"
-    )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Step 2 / 3: DiagnosisRanking & DiagnosisOutput
-# ────────────────────────────────────────────────────────────────────────────
+from src.agent.schemas.symptom_selection import UnaskableSymptom
 
 
 class RankedDisease(BaseModel):
-    """单个候选疾病的排序结果。
+    """单个候选疾病的诊断结果(字段对齐评测 `CandidateDiagnosis` + 生产新增 differentiation_type)。"""
 
-    `failure_reason` 由节点代码在兜底路径中填充(spec §4.1.2 ⑩),不由 LLM 输出。
-    LLM 在正常路径下产出 `failure_reason=None`,异常兜底时由 except 块构造。
-    """
-
-    disease: str = Field(..., description="疾病名;兜底场景固定为 '信息不足以支持可靠诊断'")
-    probability: float = Field(..., ge=0.0, le=1.0, description="概率;兜底场景为 0.0")
-    evidence_chain: list[str] = Field(default_factory=list, description="关键推理链")
-    differentiation_type: Literal["confirmed", "need_exam", "insufficient"] = Field(
-        ..., description="鉴别状态"
+    disease: str = Field(
+        ...,
+        description="疾病名;尽量精确到部位/分型(如 '右额颞急性硬膜外血肿' 而非 '颅内血肿');兜底场景固定为 '信息不足以支持可靠诊断'",
     )
-    unaskable_impact: str | None = Field(None, description="不可问体征的条件推理说明")
+    probability: float = Field(
+        ..., ge=0.0, le=1.0, description="概率;兜底场景为 0.0"
+    )
+    evidence: list[str] = Field(
+        default_factory=list,
+        description="3-5 条关键支持证据(可引用症状/报告/文献/图像)",
+    )
+    differentiation: str | None = Field(
+        None,
+        description="与其他相似疾病的鉴别要点(可空)",
+    )
+    differentiation_type: Literal["confirmed", "need_exam", "insufficient"] = Field(
+        ...,
+        description="鉴别状态;top1 决定 router 走 ⑧ recommend_exam(need_exam)还是 ⑪ safety_gate(其他)",
+    )
     failure_reason: str | None = Field(
         None,
         description=(
             "系统级失败原因(非自然 insufficient)。取值示例:"
             "'followup_round_capped'(追问触顶)、"
-            "'step_1_structured_output_failed: ValidationError: ...'、"
-            "'step_2_structured_output_failed: ...'、"
-            "'step_3_structured_output_failed: ...'。"
+            "'step_1_structured_output_failed: ValidationError: ...'(LLM 结构化输出失败)。"
             "None 表示 LLM 正常推理。该字段由节点代码在兜底路径中填充,不由 LLM 输出。"
         ),
     )
 
 
-class DiagnosisRanking(BaseModel):
-    """⑩ diagnose Step 2 输出 — 鉴别诊断排序。"""
-
-    ranked: list[RankedDisease] = Field(
-        ..., min_length=1, description="按概率降序排列的候选疾病"
-    )
-
-
 class DiagnosisOutput(BaseModel):
-    """⑩ diagnose Step 3 最终输出 — 校准后的诊断结果。"""
+    """⑩ diagnose 1 步 LLM 输出 — 诊断结果 + 精筛 unaskable。
+
+    `retained_unaskable` 是 LLM 基于当前诊断结果挑/改写的"仍需检查确认"的 unaskable
+    列表(从输入的 ⑤ 粗筛版里筛 + 必要时改写描述),节点代码写回 `state.unaskable_symptoms`
+    供 ⑧a recommend_exam 消费。LLM 判断不再需要的 → 不写进 retained_unaskable,自然丢弃。
+    """
 
     results: list[RankedDisease] = Field(
-        ..., min_length=1, description="校准后的诊断结果列表"
+        ..., min_length=1, description="按 probability 降序排列的诊断结果列表"
+    )
+    retained_unaskable: list[UnaskableSymptom] = Field(
+        default_factory=list,
+        description=(
+            "基于诊断结果挑/改写后,仍需检查确认的 unaskable 列表(可为 ⑤ 粗筛版的子集"
+            "或改写版)。confirmed/insufficient 路径下可为空(不会被消费);need_exam"
+            "路径下应至少保留 1 条供 ⑧a 推荐检查"
+        ),
     )

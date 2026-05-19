@@ -379,7 +379,7 @@ MVP 阶段不一次性把所有指标埋齐，遵循"**先上线跑基线，出�
 **适用配置项**：面向**运营端运行时调优**、需要 admin 界面在线修改的参数，例如 LLM 温度、Reranker 开关等。
 
 **不走 system_config 的配置（重要分界）**：
-- **§9.7 `agent_limits` 段的 7 个常量**（`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` / `RETRIEVE_TOP_N` / `ASKABLE_GAIN_THRESHOLD` / `ENTITY_LINKING_TIER2_THRESHOLD` / `RERANKER_CUTOFF_LAYERS`）走 `config/settings.py` + `.env` 环境变量，**不存 DB**。理由：这些值属于"一次调优即稳定"的工程常量，不需要 admin 在线修改；进 DB 反而引入缓存同步复杂度与误操作风险
+- **§9.7 `agent_limits` 段的 5 个常量**(`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` / `RETRIEVE_TOP_N` / `RERANKER_CUTOFF_LAYERS`)走 `config/settings.py` + `.env` 环境变量,**不存 DB**。理由:这些值属于"一次调优即稳定"的工程常量,不需要 admin 在线修改;进 DB 反而引入缓存同步复杂度与误操作风险
 - **基础设施连接串**（PG / Milvus / Redis / DashScope endpoint / JWT secret）走 `.env`，不存 DB
 - **Prompt 模板**走 `src/prompts/` 代码文件 + 版本管理，不存 DB
 

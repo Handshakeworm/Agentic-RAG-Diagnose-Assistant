@@ -1,288 +1,32 @@
 """src/agent/nodes/select_symptom.py — Agent ⑤ select_discriminative_symptom(DEV_SPEC §4.1.2 ⑤)。
 
-维度缺口优先 + 信息增益贪心选择 + 可问性评估,产出 followup_questions(混合类型)。
+1 次 LLM 调用直接选追问项,不再走"TF-IDF 抽症状 + 信息增益 + 可问性评估"那条
+重工程化路径(实测 ④ TF-IDF 抽出来 94% 是医学教材通用高频词而非鉴别症状,
+信息增益的统计基础不成立 — 见 EL_DESIGN_REVIEW §11)。
 
-执行流程:
-  1. 维度缺口优先(配额制 ≤ 2):present_illness_slots 空槽 → LLM 选 1~2 个
-     最有鉴别价值的维度 → 占用 MAX_FOLLOWUP_QUESTIONS 名额
-  2. 已问症状过滤:
-     - Tier 1/2 (linked=True):按 preferred_term 集合差(confirmed ∪ denied ∪ uncertain)
-     - Tier 3 (linked=False):embedding 软比对,距离 < 0.3 视为已问
-  3. 报告证据优先消费:positive_findings → confirmed_symptoms;negative_findings →
-     denied_symptoms;命中即跳过追问
-  4. 信息增益(二元熵)排序候选 → 贪心循环内可问性评估(LLM):
-     - askable=True → followup_questions(symptom)
-     - askable=False → unaskable_symptoms(附 info_gain)
-     - 名额到 → 停止
-  5. 收尾:首轮 (followup_round == 0) 跳过早退检查;否则若症状级 followup_questions
-     非空但最高增益 < ASKABLE_GAIN_THRESHOLD → 清空症状级条目;info_gain 设为
-     症状级最高(无则 0.0)
+LLM 任务:
+  - 从 13 维 HPI 空缺槽里挑 1~2 个对当前主诉**诊断价值最高**的维度问
+    (优先 patient-answerable 维度:时间/部位/性质/诱因/缓解等)
+  - 如果空缺维度都不重要 / 已大部分填满,加一条 open 式 "还有别的不舒服吗?"
+    作为兜底捕获遗漏症状
+  - 总数 ≤ MAX_FOLLOWUP_QUESTIONS
 
-LLM 调用两处(维度选择 + 每症状可问性评估),按 §9.1 中安全级模板独立写埋点。
+LLM 调用 1 处,按 §9.1 中安全级模板独立写 try/except/finally 埋点。
 """
 from __future__ import annotations
 
 import logging
-import math
 import time
 
 from config.settings import settings
-from src.agent.schemas.symptom_selection import (
-    AskabilityJudgment,
-    DimensionSelection,
-)
+from src.agent.schemas.symptom_selection import SmartFollowupOutput
 from src.agent.state import MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
-from src.models.embedding_model import get_embedding_model
 from src.models.llm_client import get_llm
-from src.prompts.agent import (
-    build_askability_prompt,
-    build_dimension_selection_prompt,
-)
+from src.prompts.agent import build_smart_followup_prompt
 
 
 _logger = logging.getLogger(__name__)
-
-_TIER3_SOFT_MATCH_DIST = 0.3  # cosine distance < 0.3 视为同义
-_DIMENSION_QUOTA_MAX = 2  # spec §4.1.2 ⑤ "1~2 个维度"
-
-_PREVIEW_CHUNK_TOP_M = 5      # 维度选择喂 LLM 的 chunk 摘要条数
-_PREVIEW_TEXT_MAX_LEN = 200   # 单条摘要截断长度,防 prompt 膨胀
-
-
-def _preview_chunk_summaries(candidate_chunks: list[dict]) -> list[str]:
-    """从 candidate_chunks 抽 LLM 可读的"候选疾病预览"摘要清单。
-
-    candidate_chunks 形态(spec §3.2.2 多向量聚合):
-        {source_chunk_id, rrf_score, vector_hits: [{vector_type, rank, matched_text}]}
-
-    spec §3.2.3 规则 4 已说明 vector_hits.matched_text 来自 enrichment 阶段 LLM
-    生成(summary / question),"天然带有标题路径上下文",是 chunk 主旨的可读代理。
-    优先取 summary 命中文本,其次 question,最后 original 截断;每 chunk 取 1 条。
-    """
-    out: list[str] = []
-    for c in candidate_chunks[:_PREVIEW_CHUNK_TOP_M]:
-        hits = c.get("vector_hits") or []
-        # 按优先级:summary > question > original
-        chosen: str = ""
-        for vt in ("summary", "question", "original"):
-            for h in hits:
-                if h.get("vector_type") == vt and (h.get("matched_text") or "").strip():
-                    chosen = h["matched_text"].strip()
-                    break
-            if chosen:
-                break
-        if chosen:
-            out.append(chosen[:_PREVIEW_TEXT_MAX_LEN])
-    return out
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# LLM 调用 1:维度缺口选择(中安全等级,失败 → 跳过维度追问)
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _call_dimension_selection(
-    chief_complaint: str,
-    empty_slots: list[str],
-    candidate_diseases_preview: list[str],
-    quota: int,
-) -> list[str]:
-    node, schema = "select_symptom_dimension", "DimensionSelection"
-    _attempts.labels(node=node, schema=schema).inc()
-    t0 = time.perf_counter()
-    try:
-        chain = get_llm().with_structured_output(DimensionSelection, method="json_mode").with_retry(stop_after_attempt=3)
-        result: DimensionSelection = chain.invoke(
-            build_dimension_selection_prompt(
-                chief_complaint=chief_complaint,
-                empty_slots=empty_slots,
-                candidate_diseases_preview=candidate_diseases_preview,
-                quota=quota,
-            ),
-            config={
-                "callbacks": [retry_observer],
-                "metadata": {"node": node, "schema": schema},
-            },
-        )
-        # 过滤 LLM 可能返回的不存在槽名,保留与空槽列表交集
-        valid = [s for s in result.selected_slots if s in set(empty_slots)]
-        return valid[:quota]
-    except Exception as e:
-        _failures.labels(
-            node=node, schema=schema, exception_type=type(e).__name__
-        ).inc()
-        _logger.warning(
-            "[%s] dimension selection failed, fall back to no dimension: %s",
-            node, e,
-        )
-        # spec §9.3 中安全等级失败处理:跳过维度追问,完全退化为症状级
-        return []
-    finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# LLM 调用 2:单症状可问性评估(中安全等级,失败 → 默认不可问保守策略)
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _call_askability(symptom: str) -> bool:
-    node, schema = "select_symptom_askability", "AskabilityJudgment"
-    _attempts.labels(node=node, schema=schema).inc()
-    t0 = time.perf_counter()
-    try:
-        chain = get_llm().with_structured_output(AskabilityJudgment, method="json_mode").with_retry(stop_after_attempt=3)
-        result: AskabilityJudgment = chain.invoke(
-            build_askability_prompt(symptom),
-            config={
-                "callbacks": [retry_observer],
-                "metadata": {"node": node, "schema": schema},
-            },
-        )
-        return result.askable
-    except Exception as e:
-        _failures.labels(
-            node=node, schema=schema, exception_type=type(e).__name__
-        ).inc()
-        _logger.warning(
-            "[%s] askability for '%s' failed, defaulting to unaskable: %s",
-            node, symptom, e,
-        )
-        # spec §9.3 中安全等级失败处理:保守策略,宁可少问不误问
-        return False
-    finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# 信息增益(二元熵)
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _binary_entropy(p: float) -> float:
-    if p <= 0.0 or p >= 1.0:
-        return 0.0
-    return -p * math.log2(p) - (1 - p) * math.log2(1 - p)
-
-
-def _symptom_frequency(symptom_text: str, chunks_text: list[str]) -> float:
-    """该症状在 candidate_chunks 中的出现频率(0~1)。"""
-    if not chunks_text:
-        return 0.0
-    hits = sum(1 for t in chunks_text if symptom_text in t)
-    return hits / len(chunks_text)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# 已问症状过滤
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _filter_already_asked(
-    extracted: list[dict],
-    asked_terms: set[str],
-    asked_texts: list[str],
-    embed,
-) -> list[dict]:
-    """Tier 1/2 按 preferred_term 集合差;Tier 3 用 embedding 软比对。"""
-    out: list[dict] = []
-    if asked_texts:
-        try:
-            asked_vecs = embed.encode(asked_texts)
-        except Exception:
-            asked_vecs = None
-    else:
-        asked_vecs = None
-
-    for item in extracted:
-        if item["linked"] and item["preferred_term"] in asked_terms:
-            continue
-        if not item["linked"] and asked_vecs:
-            try:
-                v = embed.encode_one(item["text"])
-                # cosine distance = 1 - cosine similarity;cosine for normalized = dot
-                # 但 SentenceTransformer 默认未归一,这里粗略用距离阈值
-                from numpy import array, dot
-                from numpy.linalg import norm
-                vn = array(v)
-                close = False
-                for av in asked_vecs:
-                    avn = array(av)
-                    sim = dot(vn, avn) / (norm(vn) * norm(avn) + 1e-9)
-                    if (1.0 - float(sim)) < _TIER3_SOFT_MATCH_DIST:
-                        close = True
-                        break
-                if close:
-                    continue
-            except Exception:
-                pass
-        out.append(item)
-    return out
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# 报告证据消费
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _consume_report_evidence(
-    extracted: list[dict],
-    report_findings: list[dict],
-    confirmed_symptoms: list[str],
-    denied_symptoms: list[str],
-) -> tuple[list[dict], list[str], list[str]]:
-    """positive_findings → confirmed,negative_findings → denied;命中症状直接消费。"""
-    pos_set: set[str] = set()
-    neg_set: set[str] = set()
-    for f in report_findings:
-        pos_set.update(f.get("positive_findings") or [])
-        neg_set.update(f.get("negative_findings") or [])
-
-    new_confirmed = list(confirmed_symptoms)
-    new_denied = list(denied_symptoms)
-    remaining: list[dict] = []
-    for item in extracted:
-        pt = item.get("preferred_term")
-        text = item.get("text")
-        consumed = False
-        if pt and pt in pos_set:
-            if pt not in new_confirmed:
-                new_confirmed.append(pt)
-            consumed = True
-        elif text and text in pos_set:
-            if text not in new_confirmed:
-                new_confirmed.append(text)
-            consumed = True
-        elif pt and pt in neg_set:
-            if pt not in new_denied:
-                new_denied.append(pt)
-            consumed = True
-        elif text and text in neg_set:
-            if text not in new_denied:
-                new_denied.append(text)
-            consumed = True
-        if not consumed:
-            remaining.append(item)
-    return remaining, new_confirmed, new_denied
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# 主入口
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _candidate_text(chunk: dict) -> str:
-    parts = []
-    for vh in chunk.get("vector_hits") or []:
-        mt = (vh.get("matched_text") or "").strip()
-        if mt:
-            parts.append(mt)
-    return " ".join(parts)
 
 
 def _empty_slots(slots) -> list[str]:
@@ -295,87 +39,85 @@ def _empty_slots(slots) -> list[str]:
     return out
 
 
-def select_discriminative_symptom(state: MedicalState) -> dict:
-    K = settings.agent_limits.MAX_FOLLOWUP_QUESTIONS
-    threshold = settings.agent_limits.ASKABLE_GAIN_THRESHOLD
+def _filled_slots(slots) -> dict:
+    """已填槽 dict(供 prompt 展示)。"""
+    return {k: v for k, v in slots.model_dump().items() if v}
 
-    # ─── 维度缺口优先 ───
-    empty_slots = _empty_slots(state.present_illness_slots)
-    dimension_picks: list[str] = []
-    # spec §4.1.2 ⑤ Step "维度选择":LLM 输入需 candidate_chunks "摘要",而非 chunk_id
-    # 哈希;从 vector_hits.matched_text 抽 chunk 的语义代理(spec §3.2.2 多向量聚合
-    # 副载荷天然带 enrichment summary / question 文本,代表 chunk 主旨)
-    candidate_disease_preview = _preview_chunk_summaries(state.candidate_chunks)
-    if empty_slots:
-        quota = min(_DIMENSION_QUOTA_MAX, K)
-        dimension_picks = _call_dimension_selection(
+
+# ────────────────────────────────────────────────────────────────────────────
+# LLM 调用 — Smart followup(中安全,失败 → 空 followup 直接跳诊断)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _call_smart_followup(state: MedicalState) -> SmartFollowupOutput:
+    node, schema = "select_symptom_smart_followup", "SmartFollowupOutput"
+    _attempts.labels(node=node, schema=schema).inc()
+    t0 = time.perf_counter()
+    try:
+        chain = get_llm().with_structured_output(
+            SmartFollowupOutput, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
+        prompt = build_smart_followup_prompt(
             chief_complaint=state.chief_complaint,
-            empty_slots=empty_slots,
-            candidate_diseases_preview=candidate_disease_preview,
-            quota=quota,
+            present_illness=state.present_illness,
+            filled_slots=_filled_slots(state.present_illness_slots),
+            empty_slots=_empty_slots(state.present_illness_slots),
+            confirmed_symptoms=list(state.confirmed_symptoms),
+            denied_symptoms=list(state.denied_symptoms),
+            uncertain_symptoms=list(state.uncertain_symptoms),
+            quota=settings.agent_limits.MAX_FOLLOWUP_QUESTIONS,
+        )
+        return chain.invoke(
+            prompt,
+            config={
+                "callbacks": [retry_observer],
+                "metadata": {"node": node, "schema": schema},
+            },
+        )
+    except Exception as e:
+        _failures.labels(
+            node=node, schema=schema, exception_type=type(e).__name__
+        ).inc()
+        _logger.warning(
+            "[%s] smart followup failed, fall back to empty followup: %s", node, e,
+        )
+        # spec §9.3 中安全等级失败处理:跳过本轮追问,直接进诊断
+        return SmartFollowupOutput(questions=[])
+    finally:
+        _latency.labels(node=node, schema=schema).observe(
+            time.perf_counter() - t0
         )
 
-    followup_questions: list[dict] = [
-        {"slot": s, "type": "dimension"} for s in dimension_picks
-    ]
-    remaining_quota = K - len(followup_questions)
 
-    # ─── 报告证据优先消费(可能直接消化掉部分症状) ───
-    extracted_remaining, new_confirmed, new_denied = _consume_report_evidence(
-        list(state.extracted_symptoms),
-        state.report_findings,
-        state.confirmed_symptoms,
-        state.denied_symptoms,
-    )
+# ────────────────────────────────────────────────────────────────────────────
+# 主入口
+# ────────────────────────────────────────────────────────────────────────────
 
-    # ─── 已问症状过滤 ───
-    asked_terms = (
-        set(new_confirmed) | set(new_denied) | set(state.uncertain_symptoms)
-    )
-    asked_texts = list(asked_terms)
-    embed = get_embedding_model()
-    filtered = _filter_already_asked(
-        extracted_remaining, asked_terms, asked_texts, embed
-    )
 
-    # ─── 信息增益排序 ───
-    chunks_text = [_candidate_text(c) for c in state.candidate_chunks]
-    gains: list[tuple[dict, float]] = []
-    for item in filtered:
-        text = item.get("preferred_term") or item.get("text") or ""
-        p = _symptom_frequency(text, chunks_text)
-        gains.append((item, _binary_entropy(p)))
-    gains.sort(key=lambda x: x[1], reverse=True)
+def select_discriminative_symptom(state: MedicalState) -> dict:
+    """1 次 LLM 同时出 3 件事:追问项 + unaskable 粗筛 + 信息增益占位。
 
-    # ─── 贪心 + 可问性评估(剩余名额内) ───
-    symptom_questions: list[dict] = []
-    unaskable: list[dict] = []
-    symptom_max_gain = 0.0
-    for item, gain in gains:
-        if remaining_quota <= 0:
-            break
-        term = item.get("preferred_term") or item.get("text") or ""
-        if not term:
-            continue
-        if _call_askability(term):
-            symptom_questions.append({"term": term, "type": "symptom"})
-            symptom_max_gain = max(symptom_max_gain, gain)
-            remaining_quota -= 1
-        else:
-            unaskable.append({"preferred_term": term, "info_gain": gain})
-
-    # ─── 阈值兜底 ───
-    if state.followup_round > 0 and symptom_questions:
-        if symptom_max_gain < threshold:
-            symptom_questions = []  # 清空症状级
-            symptom_max_gain = 0.0
-
-    followup_questions.extend(symptom_questions)
-
+    - `followup_questions`:追问项(slot 维度补全 / open 开放式);空 → 路由跳诊断
+    - `unaskable_symptoms`:LLM 想知道但患者答不上的体征/指标(粗筛版),
+      ⑩ Step 3 会基于诊断结果再次校准并覆盖此字段
+    """
+    result = _call_smart_followup(state)
+    # 边界校验:slot type 必须带 slot 名;open type 不带
+    followup_questions: list[dict] = []
+    for q in result.questions:
+        if q.type == "slot":
+            if not q.slot:
+                continue  # 缺 slot 名的 slot type 丢弃
+            followup_questions.append({"type": "slot", "slot": q.slot})
+        elif q.type == "open":
+            followup_questions.append({"type": "open"})
+    # 截到 quota(LLM 已经约束 max_length=5 但兜底再截)
+    followup_questions = followup_questions[: settings.agent_limits.MAX_FOLLOWUP_QUESTIONS]
+    # unaskable 粗筛同样兜底截到 quota
+    unaskable: list[dict] = [u.model_dump() for u in result.unaskable_symptoms]
+    unaskable = unaskable[: settings.agent_limits.MAX_FOLLOWUP_QUESTIONS]
     return {
         "followup_questions": followup_questions,
         "unaskable_symptoms": unaskable,
-        "info_gain": symptom_max_gain if symptom_questions else 0.0,
-        "confirmed_symptoms": new_confirmed,
-        "denied_symptoms": new_denied,
+        "info_gain": 0.0,  # 不再算(已移除信息增益机制)
     }

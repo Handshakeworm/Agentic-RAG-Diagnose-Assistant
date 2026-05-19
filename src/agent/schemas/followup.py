@@ -1,30 +1,18 @@
 """Agent ⑦ process_followup_answer LLM 输出 schema(DEV_SPEC §9.5 第 7 项)。
 
-⑦ 同时处理症状级回答(对应 ⑤ 选出的 symptom 类追问)和维度级回填
-(对应 ⑤ 选出的 dimension 类追问),还要捕获回答中新提到的症状。
+⑦ 解析患者对 ⑥a 追问的回答,产出两类信息:
+  - slot_fills: 维度级回填(对应 ⑤ 选出的 type=slot 追问项)
+  - new_symptoms: 患者回答中主动提到的新症状(对应 ⑤ 选出的 type=open 追问项,
+    或患者顺带补充的副症状),直接进 confirmed_symptoms 供下轮 build_query 使用
 """
 from __future__ import annotations
 
-from typing import Literal
-
 from pydantic import BaseModel, Field
-
-
-class SymptomResponse(BaseModel):
-    """单个症状的患者回答解析。"""
-
-    term: str = Field(..., description="症状标准术语(preferred_term)")
-    status: Literal["confirmed", "denied", "uncertain", "unanswered"] = Field(
-        ..., description="患者对该症状的回答状态"
-    )
 
 
 class FollowupParseResult(BaseModel):
     """⑦ process_followup_answer LLM 输出。"""
 
-    symptom_responses: list[SymptomResponse] = Field(
-        default_factory=list, description="各症状的回答解析"
-    )
     slot_fills: dict[str, str | list[str]] = Field(
         default_factory=dict,
         description=(
@@ -35,5 +23,6 @@ class FollowupParseResult(BaseModel):
         ),
     )
     new_symptoms: list[str] = Field(
-        default_factory=list, description="患者回答中新提及的症状(供下轮 build_query 使用)"
+        default_factory=list,
+        description="患者回答中提及的新症状(开放式追问的主要产物,也包括患者顺带补充)",
     )

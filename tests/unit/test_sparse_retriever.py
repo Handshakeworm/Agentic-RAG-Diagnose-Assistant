@@ -73,7 +73,7 @@ def test_source_id_filter_propagates_to_each_call(fake_bm25) -> None:
 
 
 def test_empty_queries_returns_empty_list(fake_bm25) -> None:
-    """空入入 → 空列表,无 BM25 调用(沿袭 query_processing 已过滤空词袋的契约)。"""
+    """空入入 → 空列表,无 BM25 调用(沿袭 build_query Step 2 长度过滤已剔空词袋的契约)。"""
     out = sr.search_sparse_routes([])
     assert out == []
     assert fake_bm25 == []

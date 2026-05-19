@@ -28,8 +28,6 @@ class AgentLimitsSettings(BaseSettings):
     MAX_EXAM_ROUNDS: int = Field(3, description="检查循环硬性上限")
     MAX_FOLLOWUP_QUESTIONS: int = Field(5, description="单轮追问问题条数上限(症状级 + 维度级合计)")
     RETRIEVE_TOP_N: int = Field(200, description="RRF 融合后 Top-N 截断")
-    ASKABLE_GAIN_THRESHOLD: float = Field(0.15, description="可问症状信息增益阈值")
-    ENTITY_LINKING_TIER2_THRESHOLD: float = Field(0.92, description="terms_collection 向量检索 Cosine 截断")
     RERANKER_CUTOFF_LAYERS: int | None = Field(None, description="layerwise early-exit 层数,None=全 40 层(模型自身完整深度)")
     RETRIEVE_PARENT_FIGURE_CAP: int = Field(5, description="Context 扩展规则 3:父块在 LLM context 里能带的同节图表数封顶")
     RRF_DENSE_WEIGHT_FACTOR: int = Field(5, description="RRF 加权融合:dense_weight = max(1, N_sparse/factor)。RETRIEVAL_EVAL §4 评测:sparse 路数 12~30 时等权融合 dense 被挤兑,N/5 加权保留 D:S ≈ 1:3~1:4")

@@ -30,14 +30,11 @@
 | `build_exam_report_reading_prompt` | ①⑨ | 多模态理解检验单/影像报告（文字+图像+PDF），返回结构化摘要 |
 | `build_ner_prompt` | ② | 从新增文本中抽取医疗实体（症状/疾病/药物/解剖），含否定标记与时序 |
 | `build_query_construction_prompt` | ② | 基于标准化实体构造 Dense / Sparse 双路查询 |
-| `build_dimension_selection_prompt` | ⑤ | 从 `present_illness_slots` 空槽中选出 1~2 个对当前候选疾病鉴别最有价值的维度（输入：chief_complaint + 空槽列表 + candidate_chunks 摘要） |
-| `build_askability_prompt` | ⑤ | 判断高信息增益症状是否"患者可自述"（可询问）或"需要体格检查"（不可询问） |
-| `build_followup_prompt` | ⑥ | 将混合类型追问项（维度级 `type: "dimension"` + 症状级 `type: "symptom"`）转化为患者可理解的流畅追问句式 |
-| `build_process_followup_answer_prompt` | ⑦ | 解析患者追问回答：症状级 → 确认/否认/不确定三类分流；维度级 → 回填 `present_illness_slots` 对应槽位 + 追加 `present_illness`；同时提取新增症状信息 |
+| `build_smart_followup_prompt` | ⑤ | 1 LLM 直接选追问 — 输入 state(主诉 + 13 维 slots 空缺 + 已问症状),输出 `questions: list[FollowupQuestion]`(slot 维度填补 / open 兜底问) |
+| `build_followup_question_prompt` | ⑥a | 将两种 type 追问项(slot 维度填补 + open 开放式)转化为患者可理解的流畅追问句式 |
+| `build_followup_parse_prompt` | ⑦ | 解析患者追问回答:slot 类 → 回填 `present_illness_slots` + 追加 `present_illness`;open 类 → 提取新症状到 `new_symptoms`(由 ⑦ append 到 confirmed_symptoms) |
 | `build_exam_recommendation_prompt` | ⑧ | 根据待鉴别症状推断所需检查（体格检查+辅助检查），输出优先级与鉴别理由 |
-| `build_evidence_assembly_prompt` | ⑩ Step 1 | 证据归集：从 reranked_chunks 提取候选疾病，对每个候选归集 confirmed/denied symptoms、present_illness_slots 维度信息、病史摘要、report_findings 三类证据，输出 `EvidenceSheet`（不做概率判断，只做事实级归集） |
-| `build_differential_ranking_prompt` | ⑩ Step 2 | 鉴别诊断排序：基于 `EvidenceSheet` 做临床决策排序（客观检查 > 主观症状），对 `unaskable_symptoms` 做阳性/阴性条件推理，输出 `DiagnosisRanking`（含概率、推理链、differentiation_type） |
-| `build_confidence_calibration_prompt` | ⑩ Step 3 | 置信度校准：用 confirmed_symptoms + denied_symptoms + report_findings 原始事实交叉验证 Step 2 输出，核查幻觉、校准 top1/top2 概率差合理性、校准 differentiation_type 与概率分布一致性，修正后输出最终 `DiagnosisOutput` |
+| `build_diagnose_prompt` | ⑩ 1 步 LLM | 诊断推理：全量患者画像(主诉+现病史+slots+symptoms+history+reports)+ 文献(20 父块 + figure 多模态)+ ⑤ unaskable 粗筛 → 一次 LLM 出 `DiagnosisOutput`(results + retained_unaskable);对齐 RAG 评测 `.eval/rag_eval/run_diagnose_eval.py` 口径,3 步链已废弃 |
 | `build_safety_gate_prompt` | ⑪ | 规则层无法覆盖时的 LLM 兜底：交叉过敏风险、罕见药物相互作用、肝肾功能剂量调整 |
 | `build_advice_prompt` | ⑫ | 在安全约束范围内生成用药建议 / 检查建议 / 风险提示，高风险路径（疑似心梗/卒中）优先输出急诊提示 |
 | `build_format_response_prompt` | ⑬ | 将结构化诊断与建议整理为自然语言，附加免责声明 |
@@ -58,7 +55,7 @@
 ## 7.3 设计原则
 
 - **封装形式**：Prompt 以 Python 函数封装，接受结构化参数，返回 `(system: str, user: str)` 元组，不在业务代码中内联字符串
-- **导入方式**：`from src.prompts.agent import build_evidence_assembly_prompt, build_differential_ranking_prompt, build_confidence_calibration_prompt`，各模块职责边界清晰
+- **导入方式**：`from src.prompts.agent import build_diagnose_prompt`，各模块职责边界清晰
 - **可测试性**：Prompt 函数可独立单元测试，验证模板渲染正确性与参数边界行为
 - **Few-shot 管理**：安全门控、诊断推理等高风险 Prompt 的 few-shot examples 与函数定义放在同一文件中，不得散落在业务代码里
 - **版本追踪**：每个文件通过模块级 `__prompt_version__` 常量标记版本号，确保评估报告可回溯到具体 Prompt 版本

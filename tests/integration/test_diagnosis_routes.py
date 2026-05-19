@@ -133,7 +133,7 @@ def test_first_round_completed_writes_rag_trace(
         "chief_complaint": "腹痛三天",
         "confirmed_symptoms": ["腹痛", "反酸"],
         "denied_symptoms": [],
-        "standardized_entities": [{"text": "腹痛", "code": "R10.9"}],
+        # standardized_entities 字段已随 EL 移除一并删除
         "candidate_chunks": [{"source_chunk_id": "c1", "rrf_score": 0.9}],
         "last_reranked_chunks": [{"source_chunk_id": "c1", "rerank_score": 0.92}],
         "last_diagnose_prompt": None,
@@ -225,7 +225,7 @@ def test_failure_path_writes_error_info(
         "chief_complaint": "",
         "confirmed_symptoms": [],
         "denied_symptoms": [],
-        "standardized_entities": [],
+        # standardized_entities 字段已随 EL 移除一并删除
         "candidate_chunks": [],
         "last_reranked_chunks": [],
         "last_diagnose_prompt": "<step 2 prompt>",

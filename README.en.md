@@ -29,7 +29,7 @@
 | Metric | Score | Meaning |
 |---|---|---|
 | **Top-1 clinical hit rate** | **93.5%** | LLM's first candidate is clinically equivalent to gold (58/62) |
-| **Top-3 hit rate** | **100%** | Gold primary diagnosis always in top 3 — **62/62 no missed diagnosis** |
+| **Top-2 hit rate** | **100%** | Gold primary diagnosis always in top 2 — **62/62, the diagnostic direction is almost never missed** |
 | **0 primary direction errors** | **0/62** | All cases produced the correct diagnostic direction (no `none`) |
 | **Multi-gold average coverage** | **86.7%** | Multi-gold cases have 86.7% of gold diagnoses listed on average |
 | Multi-gold full recall rate | 72.6% | Multi-gold cases where ALL gold diagnoses are covered (45/62) |
@@ -40,7 +40,7 @@
 
 ## Project Positioning
 
-**What it does**: User describes symptoms in natural language. The system clarifies history through multi-round follow-up, retrieves 13 medical textbooks as the knowledge base, and **gives an initial diagnosis + differential directions + recommended further exams**. 62-case Chinese licensed-physician exam evaluation: **Top-1 clinical-equivalent hit rate 93.5%, Top-3 100%, zero primary-direction errors** (see [Evaluation Results](#evaluation-results-62-cases-from-chinese-licensed-physician-exam-2026-05-17) above).
+**What it does**: User describes symptoms in natural language. The system clarifies history through multi-round follow-up, retrieves 13 medical textbooks as the knowledge base, and **gives an initial diagnosis + differential directions + recommended further exams**. 62-case Chinese licensed-physician exam evaluation: **Top-1 clinical-equivalent hit rate 93.5%, Top-2 100%, zero primary-direction errors** (see [Evaluation Results](#evaluation-results-62-cases-from-chinese-licensed-physician-exam-2026-05-17) above).
 
 **Who it serves**: Patients needing initial diagnostic judgment and care navigation. All LLM outputs are filtered by a `safety_gate` node — **no prescriptions, no replacement for face-to-face physician care**. The system's role is "give the diagnostic directions a physician might consider + recommend how to investigate further"; final diagnosis and treatment still rest with a licensed physician.
 
@@ -93,7 +93,7 @@ See [DEV_SPEC.md §8.4 progress table](DEV_SPEC.md#84-进度跟踪表). As of 20
 | A | Engineering skeleton & infrastructure base | Done |
 | B | Data layer & model clients | Done |
 | C | Ingestion Pipeline | Main flow working (13 books ingested); production hardening pending |
-| D | Terminology + Entity Linking | ICD-10 ingested; colloquial vocabulary pending |
+| D | Terminology (data shelved) | ICD-10 alias 40k+ ingested; not used at runtime |
 | E | Retrieval (Sparse / Dense / RRF / Reranker / Filter) | Done |
 | F | Agent workflow (16 nodes + 2 routers) | Done |
 | G | API layer & permissions (7 items) | Done |
@@ -101,7 +101,7 @@ See [DEV_SPEC.md §8.4 progress table](DEV_SPEC.md#84-进度跟踪表). As of 20
 | I | Evaluation system | **Mostly done** (RAG retrieval + diagnosis closed-loop + dual-layer LLM Judge; Agent multi-round follow-up evaluation pending) |
 | J | End-to-end acceptance & doc consolidation | J0 (Dockerization) done; J1-J6 pending |
 
-**Test coverage**: 357 unit PASS / 71 integration PASS (real PG + Milvus + Redis) / e2e reserved for J1-J4; 17 skipped (GPU models + known Milvus race).
+**Test coverage**: 342 unit PASS / 71 integration PASS (real PG + Milvus + Redis) / e2e reserved for J1-J4; 17 skipped (GPU models + known Milvus race).
 
 ---
 

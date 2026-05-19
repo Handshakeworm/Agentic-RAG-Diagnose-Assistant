@@ -689,7 +689,7 @@ Milvus 写入失败时，**不回滚** PostgreSQL 中已写入的 chunk 元数�
 各步骤均在 `build_query` ② 节点内完成，产出 `dense_query`（str）和 `sparse_queries`（list[str]）两个 State 字段，分别作为稠密/稀疏两路的检索输入：
 
 **Sparse Route 专用处理**
-1. 关键词识别 (Keyword Extraction)：由 ② build_query Step 1 调 LLM 做医学 NER（`build_query_step1_ner`，详见 §9.3），从 `chief_complaint + present_illness` 直接提取实体；EL 产出 `confirmed_symptoms` 等供下游 ⑤ select_symptom 消费。**NER 不再驱动 sparse 词袋**(2026-05-17 RETRIEVAL_EVAL §2 评测决定:中文症状词 EL 50% Tier 3 占位,alias 反查同义词收益低)。
+1. 关键词识别 (Keyword Extraction):由 ② build_query Step 1 调 LLM 做医学 NER(`build_query_step1_ner`,详见 §9.3),从 `chief_complaint + present_illness` 直接提取实体;**NER 直接产 raw text 进 `confirmed_symptoms` / `denied_symptoms`,不再做 EL 归一化**(EL 整层下线,见 §4.1.6.2);**NER 也不驱动 sparse 词袋**(2026-05-17 RETRIEVAL_EVAL §2 评测决定:中文症状词 EL 50% Tier 3 占位,alias 反查同义词收益低,sparse 改 state 多字段直采)。
 2. Sparse 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造):`sparse_queries` 由 state 多字段直采,每条作一次独立 BM25 查询(strip 后长度 ≥ 2 过滤、保序去重):
    - **来源 A(state 结构化字段直采)**:
      - `chief_complaint`(顶层主诉)
@@ -699,10 +699,10 @@ Milvus 写入失败时，**不回滚** PostgreSQL 中已写入的 chunk 元数�
      - **阴性过滤**:`impressions` 中含 `(-)` / `正常` / `阴性` / `未见` / `无异常` 字样的整条跳过(BM25 不懂否定,反向贡献)。`abnormal_values` 原始数值与 `negative_findings` 同样不进 query。
    - **不入 sparse 的字段(理由扎实)**:`present_illness`(200+ 字必然 OR 退化)/ `treatment_tried`(拉到药学 chunk 不是诊断 chunk)/ `treatment_response`(全是"好转/无效"结论性词,无 IDF)/ `onset_time`("3 天前" KB 教材不写相对时间)/ `progression`(实测只 3 个泛词)
    - **实测数量**:62 case 平均 21.8 条 sparse(case 001 简单 16 条 / case 062 复杂报告 28 条)
-   - **不再用 EL alias 反查**(EL Step 2 仍在节点 ② 跑,但其产物只供 confirmed_symptoms / standardized_entities 下游消费,不进 sparse;参见 EL_DESIGN_REVIEW §11)
+   - **不用 EL alias 反查**(EL 整层下线,terms_collection 数据保留但运行时不查;详见 §4.1.6.2 + EL_DESIGN_REVIEW §11)
 
 **Dense Route 专用处理**
-3. Query 整合改写 (Dense Query Construction)：LLM 将所有确认症状（`preferred_term`）、病史关键项、`report_findings` 的 `positive_findings`/`impressions`，以及 `present_illness_slots` 中已填充的维度信息（诱因、加重/缓解因素、症状性质等）整合，改写为语义连贯的自然语言查询句（如"进食后加重的上腹胀痛伴反酸，白细胞升高，既往糖尿病史"），生成单一的 `dense_query`，用于 1 次向量检索。维度信息的纳入使 query 从泛化症状描述细化为具有鉴别特征的临床描述，显著提升召回精度。
+3. Query 整合改写 (Dense Query Construction):LLM 将所有确认症状(`confirmed_symptoms`,EL 移除后为 raw text)、病史关键项、`report_findings` 的 `positive_findings`/`impressions`,以及 `present_illness_slots` 中已填充的维度信息(诱因、加重/缓解因素、症状性质等)整合,改写为语义连贯的自然语言查询句(如"进食后加重的上腹胀痛伴反酸,白细胞升高,既往糖尿病史"),生成单一的 `dense_query`,用于 1 次向量检索。维度信息的纳入使 query 从泛化症状描述细化为具有鉴别特征的临床描述,显著提升召回精度。
 
 ### 3.2.2 召回
 注意，召回前可以使用元数据提前过滤，缩小候选集、降低成本。
@@ -816,7 +816,7 @@ Cross-Encoder 精排截断出 Top-K chunk 后,在构建 LLM prompt 前对每个 
 
 **去重**:四条规则展开后按 chunk_id 去重(常见 case:图表 chunk 直接命中触发规则 2,父块展开触发规则 3,同一图表被两条路径都拉出来;规则 4 的 matched_text 仅在不与已展开正文重叠时附加)。
 
-**作用域**:扩展产物**仅用于当次 LLM prompt 构建**,不写回 `candidate_chunks` State 字段。`candidate_chunks` 全程存储 Top-K 原 chunk,其余节点(`select_discriminative_symptom ⑤`、`extract_symptoms ④`)对扩展逻辑完全无感知。
+**作用域**:扩展产物**仅用于当次 LLM prompt 构建**,不写回 `candidate_chunks` State 字段。`candidate_chunks` 全程存储 Top-K 原 chunk,其余节点对扩展逻辑完全无感知。
 
 **为什么图表 chunk 同行多列**(2026-05-12 重构):原"源 + summary 两行"架构需 `linked_chunk_id` 回查,新单行设计下 `chunk_raw_text`(table=html / figure=caption)+ `medical_statement`(LLM 陈述)+ `image_path`(截图)同行直读,LLM 一次拿到全部结构化内容,无 JOIN。
 
@@ -824,16 +824,12 @@ Cross-Encoder 精排截断出 Top-K chunk 后,在构建 LLM prompt 前对每个 
 
 **父块大小**(2026-05-03 POC 验证):新切分方案下父块 median 1346 字 / p95 3563 字 / max 5218 字(~720~3700 token),约 56% 父块 > 1200 字会切多 child(其余 44% 父块 ≤ 1200 字,1 child = parent 整段)。父块全文 + 5 个图表的 payload 塞入 LLM prompt 完全可控,**不需要做任何"展开整节为多 chunk"的额外扩展逻辑** — 直接用父块文本 + 图表 payload 即可。
 
-**LLM 路由**(⑩ diagnose 三步链按需切换多模态):
+**LLM 路由**(⑩ diagnose 1 步 LLM,原生多模态):
 
-| 步骤 | LLM | 路由原因 |
-|---|---|---|
-| **Step 1 EvidenceSheet** | DashScope qwen3.5-plus(`settings.llm.VISION_*`,见 §9.3) | context 中 figure chunk 的 `image_path` 转 base64 作为多模态消息送入,LLM 自己看图;table chunk 仅送 `chunk_raw_text`(html 已是高质量文本,无需重看截图);figure 不在 context 时本步也固定走 vision LLM,代码无分支判断 |
-| **Step 2 DiagnosisRanking** | DeepSeek 主链 LLM(`settings.llm.*`) | 输入是 Step 1 浓缩好的结构化 `EvidenceSheet`,不再消费图截图 |
-| **Step 3 DiagnosisOutput** | DeepSeek 主链 LLM | 同上,基于 Step 2 排序做置信度校准 |
+⑩ 现在是 1 步 LLM 走 DashScope qwen3.5-plus(`settings.llm.VISION_*`,见 §9.3)。context 中 figure chunk 的 `image_path` 转 base64 作为多模态消息送入,LLM 自己看图;table chunk 仅送 `chunk_raw_text`(html 已是高质量文本);figure 不在 context 时也固定走 vision LLM,代码无分支判断。
 
-**为什么 Step 1 固定走 vision 而不按需切换**:
+**为什么固定走 vision 而不按需切换**:
 - 代码层避免"看 context 里有没有 figure 再决定走哪个 LLM"的运行时分支判断,提高可读性与可测性
-- vision LLM 处理纯文本输入也没问题,只是成本略高;但 ⑩ Step 1 是 Agent 主路径核心节点,稳定性优于成本
+- vision LLM 处理纯文本输入也没问题,只是成本略高;⑩ 是 Agent 主路径核心节点,稳定性优于成本
 - enrichment 阶段的图表入库(C4 figure_enrichment 已走 vision LLM 看图生成 `medical_statement` 用于召回)与诊断阶段的"再看一次图"职责分离 — 召回阶段的 vision LLM 看到的是孤立图,诊断阶段的 vision LLM 看到的是图 + 完整章节上下文 + 患者主诉 + 多轮证据,语义工作面完全不同,二者结论可能冲突 → 以诊断阶段为准
 

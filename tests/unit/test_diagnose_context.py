@@ -1,13 +1,14 @@
-"""tests/unit/test_diagnose_context.py — ⑩ diagnose Context 扩展 4 规则(DEV_SPEC §3.2.3)。
+"""tests/unit/test_diagnose_context.py — ⑩ diagnose Context 扩展 3 规则(DEV_SPEC §3.2.3)。
 
 覆盖:
 - 规则 1:child → parent_chunk_id 父块全文替换
 - 规则 1 兜底:parent_chunk_id 缺失 → 小块原文兜底
 - 规则 2:table/figure 直接命中 → 进 figures + image_data_uri 加载
 - 规则 3:父块 heading_path_id → 同节图表回拉(封顶 RETRIEVE_PARENT_FIGURE_CAP)
-- 规则 4:vector_hits matched_text 去重 + 与父块原文重叠跳过
 - 跨规则 2/3 去重:同 chunk_id 一份
 - chunks_lookup 异常路径降级
+
+(原规则 4 vector_hints 已删除 — ⑩ 重设计为 1 步 LLM 后,父块全文够用,vector_hints 冗余)
 """
 from __future__ import annotations
 
@@ -58,7 +59,6 @@ def test_rule1_child_expands_to_parent(mock_lookup, _figs):
 
     assert ctx["parent_texts"] == ["父块整段全文 - 含完整临床上下文"]
     assert ctx["figures"] == []
-    assert ctx["vector_hints"] == []
 
 
 @patch("src.agent.nodes.diagnose.lookup_figures_by_heading_path", return_value={})
@@ -263,44 +263,6 @@ def test_rule2_3_dedup_by_chunk_id(mock_lookup, mock_figs, _load):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 规则 4:vector_hits 去重 + 与父块原文去重
-# ────────────────────────────────────────────────────────────────────────────
-
-
-@patch("src.agent.nodes.diagnose.lookup_figures_by_heading_path", return_value={})
-@patch("src.agent.nodes.diagnose.lookup_chunk_content")
-def test_rule4_vector_hints_dedup_and_overlap_filter(mock_lookup, _figs):
-    from src.agent.nodes.diagnose import _build_diagnose_context
-
-    mock_lookup.return_value = {
-        "c1": {
-            "chunk_raw_text": "父块包含 '右上腹疼痛' 这个原文片段",
-            "medical_statement": None,
-            "parent_chunk_id": None,
-            "heading_path_id": "hp1",
-            "chunk_type": "parent",
-            "image_path": None,
-            "summary": None,
-            "title": None,
-        }
-    }
-
-    chunks = [
-        {
-            "source_chunk_id": "c1",
-            "vector_hits": [
-                {"vector_type": "summary", "matched_text": "胆囊炎概述"},
-                {"vector_type": "question", "matched_text": "胆囊炎概述"},  # 重复 → 跳
-                {"vector_type": "original", "matched_text": "右上腹疼痛"},  # 与父块重叠 → 跳
-                {"vector_type": "question", "matched_text": "怎么判断是胆囊炎"},
-            ],
-        }
-    ]
-    ctx = _build_diagnose_context(chunks, ["fb"])
-    assert ctx["vector_hints"] == ["胆囊炎概述", "怎么判断是胆囊炎"]
-
-
-# ────────────────────────────────────────────────────────────────────────────
 # 空入入 / lookup 异常降级
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -308,7 +270,7 @@ def test_rule4_vector_hints_dedup_and_overlap_filter(mock_lookup, _figs):
 def test_empty_input_returns_empty_context():
     from src.agent.nodes.diagnose import _build_diagnose_context
     ctx = _build_diagnose_context([], [])
-    assert ctx == {"parent_texts": [], "figures": [], "vector_hints": []}
+    assert ctx == {"parent_texts": [], "figures": []}
 
 
 @patch("src.agent.nodes.diagnose.lookup_figures_by_heading_path", return_value={})
@@ -316,14 +278,7 @@ def test_empty_input_returns_empty_context():
 def test_lookup_exception_degrades_to_reranked_text(_lookup, _figs):
     from src.agent.nodes.diagnose import _build_diagnose_context
 
-    chunks = [
-        {
-            "source_chunk_id": "c1",
-            "vector_hits": [{"vector_type": "question", "matched_text": "提示文本"}],
-        }
-    ]
+    chunks = [{"source_chunk_id": "c1"}]
     ctx = _build_diagnose_context(chunks, ["原文兜底"])
     assert ctx["parent_texts"] == ["原文兜底"]
     assert ctx["figures"] == []
-    # 异常路径仍然收集 vector_hints(它们来自 chunk 自身,与 PG 无关)
-    assert ctx["vector_hints"] == ["提示文本"]

@@ -30,8 +30,10 @@ def test_agent_limits_initial_values_match_spec_9_7_1() -> None:
     assert fields["MAX_EXAM_ROUNDS"].default == 3
     assert fields["MAX_FOLLOWUP_QUESTIONS"].default == 5
     assert fields["RETRIEVE_TOP_N"].default == 200
-    assert fields["ASKABLE_GAIN_THRESHOLD"].default == 0.15
-    assert fields["ENTITY_LINKING_TIER2_THRESHOLD"].default == 0.92
+    # 注:ENTITY_LINKING_TIER2_THRESHOLD 字段已随 EL 移除一并删除
+    # ASKABLE_GAIN_THRESHOLD 已随 ⑤ 重设计删除(信息增益机制不再使用)
+    assert "ENTITY_LINKING_TIER2_THRESHOLD" not in fields
+    assert "ASKABLE_GAIN_THRESHOLD" not in fields
     assert fields["RERANKER_CUTOFF_LAYERS"].default is None  # 全 40 层(模型 layerwise 完整深度)
 
 
@@ -43,14 +45,14 @@ def test_agent_limits_initial_values_match_spec_9_7_1() -> None:
 def test_env_var_overrides_agent_limits(monkeypatch: pytest.MonkeyPatch) -> None:
     """AGENT_MAX_FOLLOWUP_ROUNDS=10 必须能在不改代码的前提下覆盖默认 8。"""
     monkeypatch.setenv("AGENT_MAX_FOLLOWUP_ROUNDS", "10")
-    monkeypatch.setenv("AGENT_ASKABLE_GAIN_THRESHOLD", "0.25")
+    monkeypatch.setenv("AGENT_MAX_EXAM_ROUNDS", "5")
 
     import config.settings as mod
 
     importlib.reload(mod)  # 重读 env
     try:
         assert mod.settings.agent_limits.MAX_FOLLOWUP_ROUNDS == 10
-        assert mod.settings.agent_limits.ASKABLE_GAIN_THRESHOLD == 0.25
+        assert mod.settings.agent_limits.MAX_EXAM_ROUNDS == 5
     finally:
         # reload 恢复原始环境(monkeypatch 退出时会自动 unset env,这里再 reload 一次让单例回到默认)
         monkeypatch.undo()

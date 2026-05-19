@@ -29,7 +29,7 @@
 | 指标 | 成绩 | 含义 |
 |---|---|---|
 | **Top-1 临床命中率** | **93.5%** | LLM 第一选项就是 gold 临床等价(58/62)|
-| **Top-3 命中率** | **100%** | gold 主诊断必在前 3 — **62/62 无漏诊** |
+| **Top-2 命中率** | **100%** | gold 主诊断必在前 2 — **62/62 几乎不漏主诊断方向** |
 | **0 主诊断方向错** | **0/62** | 所有 case 都给出正确诊断方向(无 `none`)|
 | **多 gold 平均覆盖率** | **86.7%** | 多 gold case 平均 86.7% 的 gold 被 LLM 列出 |
 | 多 gold 全召回率 | 72.6% | 多 gold case 所有 gold 都被覆盖(45/62)|
@@ -58,7 +58,7 @@
 
 ## 项目定位
 
-**做什么**:用户用自然语言描述症状,系统通过多轮追问澄清病史、检索 13 本医学教材知识库、**给出初步诊断 + 鉴别诊断方向 + 进一步检查建议**。62 case 执业医考题评测:**Top-1 临床等价命中率 93.5%、Top-3 100%、0 主诊断方向错**(详见下方"评测结果")。
+**做什么**:用户用自然语言描述症状,系统通过多轮追问澄清病史、检索 13 本医学教材知识库、**给出初步诊断 + 鉴别诊断方向 + 进一步检查建议**。62 case 执业医考题评测:**Top-1 临床等价命中率 93.5%、Top-2 100%、0 主诊断方向错**(详见下方"评测结果")。
 
 **给谁用**:为患者提供初诊判断与就医引导。所有 LLM 输出经 `safety_gate` 节点二次过滤,**不开具处方剂量、不替代专业医生面诊** — 系统的角色是"给出医生可能想到的诊断方向 + 建议如何进一步检查",最终诊断与治疗仍以执业医师为准。
 
@@ -74,17 +74,17 @@
 |---|---|
 | 数据处理 / RAG | • MinerU 解析 13 本医学教材(264948 文档块),每本教科书专配一套脚本精细化清洗切分<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块 (12/13 本零边界丢失)<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
 | Embedding / Reranker | • Qwen3-Embedding-8B(8.5GB)+ BGE-Reranker-v2-minicpm-layerwise(2.6GB) INT8 量化单卡 16GB 共显<br>• 精排 layerwise 早退加速;失败 / 超时回退到召回原序 |
-| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词归一化 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 14 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
+| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词 → LLM 批量去重 + 报告证据消费 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 16 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
 | 后端 | • FastAPI + JWT 实现注册 / 登录 / 角色守卫<br>• 限流先抽象后实现:单机内存版可换多副本 Redis 共享版,业务代码不动<br>• PostgreSQL 20 表 + Alembic 6 次迁移<br>• 每次问诊同事务写响应 + 15 字段审计链路(90 天保留) |
 | 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
-| 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 355 单元 + 71 集成 PASS |
+| 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 342 单元 + 71 集成 PASS |
 
 ### 2. 多路检索 + 多向量索引(单阶段加权 RRF)
 
 不是常见的"先 dense 再 sparse 后 rerank"流水,而是召回阶段同时玩两个维度的"多":
 
-**多路加权 RRF**(state 多字段 sparse + 1 路 dense,2026-05-17 评测确定):
-- Sparse 路 **多字段直采**(放弃 EL alias 反查,RETRIEVAL_EVAL §2 评测决定):
+**多路加权 RRF**(state 多字段 sparse + 1 路 dense,RETRIEVAL_EVAL §2/§4 评测确定):
+- Sparse 路 **多字段直采**:
   - 来源 A — state 结构化字段:`chief_complaint` + `present_illness_slots` 6 单值字段(trigger/location/nature/severity/duration_pattern/onset_mode)+ 3 list 字段(associated_symptoms/aggravating/relieving)
   - 来源 B — 报告语义信号:`report_findings.positive_findings` 全加 + `impressions` 阴性过滤(`(-)`/正常/阴性/未见/无异常)
   - 实测 62 case 平均 21.8 条 sparse 词袋
@@ -292,9 +292,9 @@ graph TD;
     __start__([__start__]):::first
     N1("① info_collect<br/><i>主诉提取 + 病史/报告加载（单轮无交互）</i>")
     N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
-    N2("② build_query<br/><i>LLM NER + Entity Linking替换患者口语化表达（2.4.6）+ 术语扩展 + Query 构建/改写</i>")
+    N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N4("④ extract_symptoms<br/><i>症状提取 TF-IDF + Entity linking</i>")
+    N4("④ extract_symptoms<br/><i>症状提取 TF-IDF(零 LLM)</i>")
     N5("⑤ select_discriminative_symptom<br/><i>维度缺口优先 + 选择高区分度追问症状</i>")
     N6("⑥a generate_followup<br/><i>生成追问问题</i>")
     N6b("⑥b wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
@@ -311,9 +311,9 @@ graph TD;
     __start__ -->|"入口"| N1;
     N1 -->|"主诉提取+DB病史/报告加载"| N1b;
     N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
-    N2 -->|"NER→Entity Linking→术语扩展→构建dense_query+sparse_queries"| N3;
+    N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
     N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
-    N4 -->|"TF-IDF+术语归一化+LLM提取症状"| N5;
+    N4 -->|"TF-IDF 关键词提取"| N5;
     N5 -.->|"followup_questions 非空 → 继续追问"| N6;
     N5 -.->|"followup_questions 为空 → 进入诊断"| N10;
     N6 -->|"生成问题写入State"| N6b;
@@ -402,7 +402,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Q[用户 query] --> BQ[② build_query<br/>NER + EL]
+    Q[用户 query] --> BQ[② build_query<br/>NER + Sparse 多字段直采]
     BQ -->|dense_query| DE[Dense Route<br/>Qwen Embedding<br/>1 次 ANN]
     BQ -->|sparse_queries N 维| SP[Sparse Route<br/>N 次 BM25]
 
@@ -555,7 +555,7 @@ LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth
 |---|---|---|
 | **Top1 命中率(loose)** | **93.5%** | 主诊断在 rank=1 临床等价(58/62) |
 | **Top1 命中率(strict)** | 61.3% | rank=1 且 exact/equivalent/more_specific(38/62) |
-| **Top3 命中率** | **100% 🎯** | gold 主诊断全部在 top-3(62/62) |
+| **Top2 命中率** | **100% 🎯** | gold 主诊断全部在 top-2(62/62)— 4 个非 top1 命中 case 全部排 rank=2 |
 | **Top5 命中率** | 100% | |
 | **MRR(loose)** | ~0.96 | 几乎所有 case top1 就给出正确诊断 |
 | **Multi-gold recall mean** | 0.867 | 多并发诊断 case 平均 86.7% gold 被覆盖 |
@@ -579,7 +579,7 @@ LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth
 |---|---|
 | **Reranker 默认关闭** | K=20 下 BGE Reranker 全主指标无优势(NDCG -0.076 / Hit -1.6pp / MRR -0.065),省 2.6GB GPU + 5s 延迟 |
 | **RRF 动态加权** `dense_weight = max(1, N_sparse/5)` | 等权下 dense 单路被 sparse 多路挤兑,加权后 Top-20 内 dense exclusive chunks 保留量 ×6.5 |
-| **Sparse 多字段直采**(放弃 EL alias 反查) | step1 改造后 sparse 路数 12~30(均 21.8),信号更全 |
+| **Sparse 多字段直采** | state 字段拼接(chief + 13 维 slots + report findings)→ N 路独立 BM25;实测 N=12~30(均 21.8),信号比单 query 拼接更全 |
 | **20 unique parents 喂 LLM**(对齐 LLM Judge 口径) | parent 不参与 embedding,需从 Top-200 chunks 顺序去重 |
 
 ### 4. 评测方法 + 数据 + 脚本
@@ -613,7 +613,7 @@ LLM 给出的 4 个候选(按概率降序):
 
 ### 6. 评测局限(诚实展示)
 
-- **数据是执业医考题**(单主诊断为主 / 信息相对完整),**真实临床多病并发场景**复杂度更高;主诊断 100% 入 top-3,但多 gold case 的次诊断/合并症 LLM 不一定独立列出(case 062 麻疹给了"麻疹"但没单列"合并肺炎"作 candidate)
+- **数据是执业医考题**(单主诊断为主 / 信息相对完整),**真实临床多病并发场景**复杂度更高;主诊断 100% 入 top-2,但多 gold case 的次诊断/合并症 LLM 不一定独立列出(case 062 麻疹给了"麻疹"但没单列"合并肺炎"作 candidate)
 - **评测为单轮**(`patient_text` 一次性输入),没跑 Agent 多轮追问;production 真实场景会有 ④/⑤/⑦ 节点产出 `confirmed_symptoms` / `medical_history` 信息,目前评测里这些字段空
 - **gold 是教科书"初步诊断"答案**,带"可能性大" / "待除外" / "初步诊断:" 等不确定语气;Judge 已按"初步诊断"口径校准(忽略这类语气词)
 - **LLM Judge 评等价性**:DeepSeek 评 gold ↔ LLM 等价等级,本身有 LLM bias 风险;case-by-case 人工抽查显示评判合理(详见 [.eval/rag_eval/diagnose_judge/](.eval/rag_eval/diagnose_judge/))
@@ -630,7 +630,7 @@ LLM 给出的 4 个候选(按概率降序):
 | A | 工程骨架与基础设施基座 | 完成 |
 | B | 数据层与模型客户端 | 完成 |
 | C | Ingestion Pipeline | 主流程跑通(13 本灌库),production 化收口待补 |
-| D | 术语库 + Entity Linking | ICD-10 灌库完成,口语词表待补 |
+| D | 术语库(数据备用) | ICD-10 alias 40k+ 已灌库,运行时不调用 |
 | E | Retrieval(Sparse / Dense / RRF / Reranker / Filter) | 完成 |
 | F | Agent 工作流(16 节点 + 2 路由) | 完成 |
 | G | API 层与权限系统(7 项) | 完成 |
@@ -638,7 +638,7 @@ LLM 给出的 4 个候选(按概率降序):
 | I | 评估体系 | **主体完成**(检索 RAG 评测 + 诊断闭环 + 双层 LLM Judge,见上"评测结果";Agent 多轮追问评测待补)|
 | J | 端到端验收与文档收口 | J0(Docker 化部署)完成,J1-J6 待开始 |
 
-**测试覆盖**:unit 355 PASS / integration 71 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
+**测试覆盖**:unit 342 PASS / integration 71 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
 
 ---
 
@@ -661,13 +661,13 @@ LLM 给出的 4 个候选(按概率降序):
 │   │   └── utils/           # patient_repo / report_parser / chunks_lookup
 │   ├── rag/
 │   │   ├── ingestion/       # MinerU loader / chunking / enrichment / embedding / idempotency
-│   │   └── retrieval/       # query_processing / sparse / dense / fusion / reranker / metadata_filter
+│   │   └── retrieval/       # sparse / dense / fusion / reranker / metadata_filter
 │   ├── api/                 # FastAPI app + routes + middleware
 │   │   ├── routes/          # auth / diagnosis / patient / admin
 │   │   ├── middleware/      # auth_middleware (JWT) + rate_limiter (滑动窗口)
 │   │   └── schemas/         # Pydantic request/response
 │   ├── db/
-│   │   ├── milvus/          # docs_collection + terms_collection
+│   │   ├── milvus/          # docs_collection + terms_collection(数据备用)
 │   │   └── postgres/        # ORM(20 表)+ Alembic versions/
 │   ├── models/              # Embedding / Reranker / LLM 客户端封装
 │   ├── prompts/             # ingestion + agent 14 prompt builders
@@ -705,7 +705,7 @@ LLM 给出的 4 个候选(按概率降序):
 │
 ├── evaluation/              # 预留(在线追踪/生产评测,待补)
 └── tests/
-    ├── unit/                # 357 PASS(全 mock)
+    ├── unit/                # 342 PASS(全 mock)
     ├── integration/         # 71 PASS / 17 skip(真 PG + Milvus + Redis)
     └── e2e/                 # 真 LLM API(J 阶段)
 ```

@@ -28,9 +28,7 @@ def test_create_initial_state_returns_all_37_fields() -> None:
         # 患者信息
         "patient_id", "patient_input", "chief_complaint", "present_illness",
         "present_illness_slots", "medical_history", "exam_reports", "report_findings",
-        # 术语标准化
-        "standardized_entities",
-        # 召回与候选
+        # 召回与候选(standardized_entities 字段已随 EL 移除一并删除)
         "dense_query", "sparse_queries", "candidate_chunks", "extracted_symptoms",
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
         # 追问控制
@@ -52,7 +50,7 @@ def test_create_initial_state_returns_all_37_fields() -> None:
     extra = actual_fields - expected_fields
     assert not missing, f"缺失字段: {missing}"
     assert not extra, f"多余字段: {extra}"
-    assert len(actual_fields) == 37  # 9 段共 37 字段
+    assert len(actual_fields) == 36  # 8 段共 36 字段(standardized_entities 随 EL 一并移除)
 
 
 def test_caller_required_fields_passed_through() -> None:
@@ -121,7 +119,7 @@ def test_initial_values_match_spec_4_1_1a() -> None:
     assert s.medical_history == {}
     assert s.safety_constraints == {}
     for key in [
-        "exam_reports", "report_findings", "standardized_entities",
+        "exam_reports", "report_findings",
         "sparse_queries", "candidate_chunks", "extracted_symptoms",
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
         "followup_questions", "unaskable_symptoms", "pending_exam_results",

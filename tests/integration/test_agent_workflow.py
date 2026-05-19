@@ -16,13 +16,7 @@ import pytest
 
 from config.settings import settings
 from src.agent.schemas.advice import AdviceOutput, MedicationAdvice
-from src.agent.schemas.diagnosis import (
-    CandidateEvidence,
-    DiagnosisOutput,
-    DiagnosisRanking,
-    EvidenceSheet,
-    RankedDisease,
-)
+from src.agent.schemas.diagnosis import DiagnosisOutput, RankedDisease
 from src.agent.schemas.info_collect import (
     InfoCollectOutput,
     PresentIllnessSlots as SchemaSlots,
@@ -45,26 +39,8 @@ def stub_dbs():
             "src.agent.nodes.info_collect.load_initial_exam_reports",
             return_value=[],
         ),
-        patch(
-            "src.agent.nodes.build_query.query_term_by_alias_exact",
-            return_value={"concept_id": "R10.4", "preferred_term": "腹痛"},
-        ),
-        patch(
-            "src.agent.nodes.build_query.search_aliases",
-            return_value=[
-                {
-                    "concept_id": "R10.4",
-                    "preferred_term": "腹痛",
-                    "alias": "腹痛",
-                    "score": 0.95,
-                }
-            ],
-        ),
-        patch("src.agent.nodes.build_query.get_embedding_model"),
-        patch(
-            "src.agent.nodes.build_query.build_sparse_queries",
-            return_value=["腹痛 肚子疼"],
-        ),
+        # EL 移除后不再 patch terms_collection / embedding / build_sparse_queries —
+        # build_query 无 alias 反查,sparse_queries 由 state 多字段直采
         patch(
             "src.agent.nodes.retrieve.search_dense_route",
             return_value=[
@@ -187,21 +163,12 @@ def test_normal_confirmed_path(stub_dbs):
         QueryConstructionOutput(dense_query="进食后上腹胀痛"),
         # ⑤ select_symptom: slots 全填,无维度选择;extracted_symptoms 为空
         # (extract_symptoms 在没有 chunks_text 关键词时返回空) → 也无 askability
-        # ⑩ diagnose Step 1 / 2 / 3
-        EvidenceSheet(candidates=[
-            CandidateEvidence(disease="胆囊炎", supporting=["腹痛"]),
-        ]),
-        DiagnosisRanking(ranked=[
-            RankedDisease(
-                disease="胆囊炎", probability=0.85,
-                evidence_chain=["典型表现"],
-                differentiation_type="confirmed",
-            )
-        ]),
+        # ⑩ diagnose 1 步 LLM 输出
         DiagnosisOutput(results=[
             RankedDisease(
                 disease="胆囊炎", probability=0.85,
-                evidence_chain=["校准后保留"],
+                evidence=["典型表现"],
+                differentiation=None,
                 differentiation_type="confirmed",
             )
         ]),
