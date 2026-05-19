@@ -105,7 +105,6 @@ class MedicalState(BaseModel):
     dense_query: str = ""
     sparse_queries: list[str] = Field(default_factory=list)
     candidate_chunks: list[dict] = Field(default_factory=list)
-    extracted_symptoms: list[dict] = Field(default_factory=list)
     confirmed_symptoms: list[str] = Field(default_factory=list)
     denied_symptoms: list[str] = Field(default_factory=list)
     uncertain_symptoms: list[str] = Field(default_factory=list)
@@ -117,7 +116,6 @@ class MedicalState(BaseModel):
     followup_answer: str = ""
     followup_questions: list[dict] = Field(default_factory=list)
     unaskable_symptoms: list[dict] = Field(default_factory=list)
-    info_gain: float = 0.0
     exam_round: int = 0
     pending_exam_results: list = Field(default_factory=list)
 

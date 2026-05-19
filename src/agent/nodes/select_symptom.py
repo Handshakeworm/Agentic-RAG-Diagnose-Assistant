@@ -119,5 +119,4 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
     return {
         "followup_questions": followup_questions,
         "unaskable_symptoms": unaskable,
-        "info_gain": 0.0,  # 不再算(已移除信息增益机制)
     }

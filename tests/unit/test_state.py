@@ -28,12 +28,12 @@ def test_create_initial_state_returns_all_37_fields() -> None:
         # 患者信息
         "patient_id", "patient_input", "chief_complaint", "present_illness",
         "present_illness_slots", "medical_history", "exam_reports", "report_findings",
-        # 召回与候选(standardized_entities 字段已随 EL 移除一并删除)
-        "dense_query", "sparse_queries", "candidate_chunks", "extracted_symptoms",
+        # 召回与候选(extracted_symptoms 随 ④ 节点废弃一并移除;standardized_entities 随 EL 移除)
+        "dense_query", "sparse_queries", "candidate_chunks",
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
-        # 追问控制
+        # 追问控制(info_gain 随信息增益机制移除一并删除)
         "followup_round", "last_nlu_round", "followup_question", "followup_answer",
-        "followup_questions", "unaskable_symptoms", "info_gain",
+        "followup_questions", "unaskable_symptoms",
         "exam_round", "pending_exam_results",
         # 诊断
         "diagnosis_result",
@@ -50,7 +50,7 @@ def test_create_initial_state_returns_all_37_fields() -> None:
     extra = actual_fields - expected_fields
     assert not missing, f"缺失字段: {missing}"
     assert not extra, f"多余字段: {extra}"
-    assert len(actual_fields) == 36  # 8 段共 36 字段(standardized_entities 随 EL 一并移除)
+    assert len(actual_fields) == 34  # 8 段共 34 字段(extracted_symptoms + info_gain + standardized_entities 已删)
 
 
 def test_caller_required_fields_passed_through() -> None:
@@ -112,7 +112,6 @@ def test_initial_values_match_spec_4_1_1a() -> None:
     assert s.followup_round == 0
     assert s.last_nlu_round == 0
     assert s.exam_round == 0
-    assert s.info_gain == 0.0
 
     # 空容器
     assert s.messages == []
@@ -120,7 +119,7 @@ def test_initial_values_match_spec_4_1_1a() -> None:
     assert s.safety_constraints == {}
     for key in [
         "exam_reports", "report_findings",
-        "sparse_queries", "candidate_chunks", "extracted_symptoms",
+        "sparse_queries", "candidate_chunks",
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
         "followup_questions", "unaskable_symptoms", "pending_exam_results",
         "diagnosis_result", "recommended_tests", "medication_advice",

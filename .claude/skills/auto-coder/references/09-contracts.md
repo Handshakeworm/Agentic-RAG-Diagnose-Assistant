@@ -804,14 +804,14 @@ settings = Settings()  # 模块级单例
 ### 9.7.3 导入约定（业务代码使用方式）
 
 ```python
-# src/agent/nodes/select_discriminative_symptom.py（示例）
+# src/agent/nodes/select_symptom.py（示例)
 from config.settings import settings
 
 def select_discriminative_symptom(state: MedicalState) -> dict:
     limits = settings.agent_limits
-    # ...
-    candidates = [c for c in all_candidates if c["info_gain"] >= limits.ASKABLE_GAIN_THRESHOLD]
-    return {"followup_questions": candidates[:limits.MAX_FOLLOWUP_QUESTIONS], ...}
+    # LLM 输出后,代码侧兜底截到 quota(LLM schema 已 max_length=5,这里再截一次)
+    followup_questions = followup_questions[: limits.MAX_FOLLOWUP_QUESTIONS]
+    return {"followup_questions": followup_questions, ...}
 ```
 
 ### 9.7.4 硬性规则

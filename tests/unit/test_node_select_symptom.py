@@ -68,8 +68,8 @@ def test_empty_questions_means_info_sufficient(mock_llm):
     s = _state_with_chief()
     update = select_discriminative_symptom(s)
     assert update["followup_questions"] == []
-    assert update["info_gain"] == 0.0
     assert update["unaskable_symptoms"] == []
+    assert "info_gain" not in update  # info_gain 字段已随信息增益机制移除
 
 
 @patch("src.agent.nodes.select_symptom.get_llm")

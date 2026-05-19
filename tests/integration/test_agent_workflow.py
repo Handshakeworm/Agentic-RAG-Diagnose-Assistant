@@ -73,19 +73,14 @@ def stub_dbs():
             "src.agent.nodes.retrieve.lookup_chunk_summary_question",
             return_value={},
         ),
-        # 直接 stub graph 持有的 ④ ⑤ 函数引用 — 避免 TF-IDF 在 mock chunks 上抓出
-        # 一堆碎片关键词、⑤ 逐个调 askability 把 mock 队列耗光。集成测的重点是
-        # graph 编排(进出节点 + 路由判断),不是 ④/⑤ 内部逻辑(已在 unit 测覆盖)
-        patch(
-            "src.agent.graph.extract_symptoms",
-            side_effect=lambda state: {"extracted_symptoms": []},
-        ),
+        # 直接 stub graph 持有的 ⑤ 函数引用 — 集成测重点是 graph 编排(进出节点 +
+        # 路由判断),不是 ⑤ 内部 LLM 逻辑(已在 unit 测覆盖)。④ extract_symptoms
+        # 节点已删,不再 stub
         patch(
             "src.agent.graph.select_discriminative_symptom",
             side_effect=lambda state: {
                 "followup_questions": [],
                 "unaskable_symptoms": [],
-                "info_gain": 0.0,
             },
         ),
         patch(
@@ -161,8 +156,7 @@ def test_normal_confirmed_path(stub_dbs):
         # ② EL: 三层归一化(无 LLM,Tier 1 走 query_term_by_alias_exact mock 命中)
         # ② Query
         QueryConstructionOutput(dense_query="进食后上腹胀痛"),
-        # ⑤ select_symptom: slots 全填,无维度选择;extracted_symptoms 为空
-        # (extract_symptoms 在没有 chunks_text 关键词时返回空) → 也无 askability
+        # ⑤ select_symptom: 已在 stub 里直接返回空 followup,跳过 LLM 调用
         # ⑩ diagnose 1 步 LLM 输出
         DiagnosisOutput(results=[
             RankedDisease(

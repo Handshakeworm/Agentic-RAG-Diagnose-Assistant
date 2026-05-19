@@ -140,7 +140,14 @@ def test_first_round_completed_writes_rag_trace(
         "last_diagnose_raw_output": None,
         "final_response": "建议查胃镜",
         "diagnosis_result": [
-            {"disease": "胃炎", "probability": 0.7, "evidence_chain": ["..."]}
+            {
+                "disease": "胃炎",
+                "probability": 0.7,
+                "evidence": ["..."],
+                "differentiation": None,
+                "differentiation_type": "confirmed",
+                "failure_reason": None,
+            }
         ],
         "medication_advice": [{"drug": "奥美拉唑", "dosage": "20mg qd"}],
         "risk_warnings": ["如出现呕血请急诊"],

@@ -66,7 +66,7 @@ class DiagnoseResponse(BaseModel):
         None, description="完整诊断回复(给患者展示的最终文字)"
     )
     diagnosis_result: list[dict[str, Any]] | None = Field(
-        None, description="结构化诊断结果列表(每项含 disease/probability/evidence_chain 等)"
+        None, description="结构化诊断结果列表(每项含 disease/probability/evidence/differentiation/differentiation_type/failure_reason)"
     )
     medication_advice: list[dict[str, Any]] | None = Field(
         None, description="用药建议列表"
