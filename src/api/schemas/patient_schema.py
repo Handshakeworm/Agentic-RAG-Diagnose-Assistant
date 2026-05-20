@@ -122,3 +122,42 @@ class CreatedRecordOut(BaseModel):
     """三张子表 POST 通用响应:返回新行的 id,前端拿来做后续 DELETE。"""
 
     id: str
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 婚育/月经史(menstrual_reproductive,1:1)— PUT upsert 语义
+# ────────────────────────────────────────────────────────────────────────────
+
+
+class ObstetricUpdate(BaseModel):
+    """PUT /patients/me/obstetric 请求体 — 1:1 子表 upsert,全字段可选。
+
+    设计依据:此表是 ⑪ safety_gate 规则层硬依赖(妊娠/哺乳禁忌兜底),
+    必须有写入路径,否则女性患者用药安全永远兜不住(spec §4.1.2 ⑪)。
+    """
+
+    menarche_age: int | None = Field(None, ge=8, le=20)
+    cycle_days: int | None = Field(None, ge=14, le=90)
+    period_days: int | None = Field(None, ge=1, le=15)
+    last_menstrual_period: date | None = None
+    is_pregnant: bool | None = None
+    gravidity: int | None = Field(None, ge=0, le=30)
+    parity: int | None = Field(None, ge=0, le=30)
+    is_lactating: bool | None = None
+    menopause_age: int | None = Field(None, ge=20, le=80)
+    notes: str | None = None
+
+
+class ObstetricOut(BaseModel):
+    """PUT /patients/me/obstetric 响应体 — 完整回显当前 obstetric 行。"""
+
+    menarche_age: int | None
+    cycle_days: int | None
+    period_days: int | None
+    last_menstrual_period: date | None
+    is_pregnant: bool | None
+    gravidity: int | None
+    parity: int | None
+    is_lactating: bool | None
+    menopause_age: int | None
+    notes: str | None

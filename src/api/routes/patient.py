@@ -5,7 +5,7 @@
 身份隔离:全部端点用 `current_user.user_id`,**没有 path 参数** —
 "我的档案" 永远只能动自己的,从设计上根除"传 path id 越权"的风险。
 
-端点列表(11):
+端点列表(10):
 - GET    /patients/me                       全档案
 - PUT    /patients/me                       基本信息 + 个人史
 - POST   /patients/me/medical-history       新建一条既往病史
@@ -14,11 +14,12 @@
 - DELETE /patients/me/allergies/{id}        删除一条
 - POST   /patients/me/medications           新建一条用药
 - DELETE /patients/me/medications/{id}      删除一条
+- PUT    /patients/me/obstetric             婚育/月经史 upsert(1:1 子表)
+- DELETE /patients/me/obstetric             删除整行
 
 ⚠️ TODO(留给用户拍板):
-- 5 张子表(surgical_trauma / transfusion / family_history /
-  menstrual_reproductive / exam_reports)只在 GET /patients/me 返回值里读出,
-  独立 CRUD 端点本期未实现。是否补?
+- 4 张子表(surgical_trauma / transfusion / family_history / exam_reports)
+  只在 GET /patients/me 返回值里读出,独立 CRUD 端点本期未实现。是否补?
 - exam_reports 还涉及文件上传,需要 multipart endpoint + 落盘 / 对象存储,
   这是一块单独工作量
 - PUT 子表(改医生处方等)— 简化为"删了重建"足够 demo,真生产要 PUT
@@ -39,6 +40,8 @@ from src.api.schemas.patient_schema import (
     CreatedRecordOut,
     MedicalHistoryCreate,
     MedicationCreate,
+    ObstetricOut,
+    ObstetricUpdate,
     PatientBasicUpdate,
     PatientProfileOut,
 )
@@ -46,6 +49,7 @@ from src.db.postgres.models_patient import (
     Allergy,
     MedicalHistory,
     Medication,
+    MenstrualReproductive,
     Patient,
     User,
 )
@@ -245,3 +249,67 @@ def delete_medication(
     db: OrmSession = Depends(get_db),
 ) -> None:
     _delete_owned_or_404(db, Medication, record_id, current_user)
+
+
+# ── obstetric (1:1) ─────────────────────────────────────────────────────
+
+
+@router.put(
+    "/me/obstetric",
+    response_model=ObstetricOut,
+    summary="婚育/月经史 upsert(女性 1:1 子表;⑪ safety_gate 妊娠/哺乳禁忌兜底硬依赖)",
+)
+def upsert_my_obstetric(
+    payload: ObstetricUpdate,
+    current_user: CurrentUser = Depends(require_role("patient")),
+    db: OrmSession = Depends(get_db),
+) -> ObstetricOut:
+    """1:1 sub-table:行不存在则创建,存在则 partial update。
+
+    `payload.model_dump(exclude_unset=True)` 区分"传 None 显式清除"和"未传保持原值"。
+    """
+    _ensure_patient_row(current_user, db)
+    row: MenstrualReproductive | None = db.execute(
+        select(MenstrualReproductive).where(
+            MenstrualReproductive.patient_id == current_user.user_id
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = MenstrualReproductive(patient_id=current_user.user_id)
+        db.add(row)
+    for k, v in payload.model_dump(exclude_unset=True).items():
+        setattr(row, k, v)
+    db.flush()
+    db.refresh(row)
+    return ObstetricOut(
+        menarche_age=row.menarche_age,
+        cycle_days=row.cycle_days,
+        period_days=row.period_days,
+        last_menstrual_period=row.last_menstrual_period,
+        is_pregnant=row.is_pregnant,
+        gravidity=row.gravidity,
+        parity=row.parity,
+        is_lactating=row.is_lactating,
+        menopause_age=row.menopause_age,
+        notes=row.notes,
+    )
+
+
+@router.delete(
+    "/me/obstetric",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_my_obstetric(
+    current_user: CurrentUser = Depends(require_role("patient")),
+    db: OrmSession = Depends(get_db),
+) -> None:
+    """删除该患者整行 obstetric 记录;行不存在则幂等返 204。"""
+    row: MenstrualReproductive | None = db.execute(
+        select(MenstrualReproductive).where(
+            MenstrualReproductive.patient_id == current_user.user_id
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return  # 幂等
+    db.delete(row)
+    db.flush()

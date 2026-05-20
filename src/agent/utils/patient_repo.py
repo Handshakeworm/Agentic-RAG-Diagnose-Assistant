@@ -6,6 +6,7 @@ B1/B2 完工后(2026-05-12),§2.4.5 八张患者历史表 ORM 已落地(`models_
 返回结构对齐 spec §4.1.1 `medical_history` 字段 + §4.1.2 ① Step 2 加载映射:
 
   load_medical_history(user_id) → {
+      "basic_info":          {gender, birth_date, name},                       # ← 患者主表基本信息(零额外 query)
       "past_history":        {medical_history, surgical_trauma, transfusion},  # 既往史
       "allergy_history":     [...]                                              # 过敏史 ⚠️ safety_gate
       "medication_history":  [...]                                              # 用药史 ⚠️ safety_gate
@@ -13,6 +14,10 @@ B1/B2 完工后(2026-05-12),§2.4.5 八张患者历史表 ORM 已落地(`models_
       "obstetric_history":   {...} | None,                                      # 婚育史(女性)
       "family_history":      [...]                                              # 家族史
   }
+
+`basic_info.gender` 被 ④ select_symptom 用于"首诊女性强制问妊娠/哺乳"判断
+(让 ⑪ safety_gate 妊娠禁忌规则能真正生效);Patient 行已经为 personal_history
+查出来,直接多 return 几个字段,零额外开销。
 
 设计原则(沿用占位时期的契约):
 - 缺患者 / 缺记录 → 返回安全空值,不抛异常 — Agentic 流程对空档案 robust
@@ -22,6 +27,7 @@ B1/B2 完工后(2026-05-12),§2.4.5 八张患者历史表 ORM 已落地(`models_
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date
 
 from sqlalchemy import select
@@ -47,11 +53,26 @@ def _date_to_iso(d: date | None) -> str | None:
     return d.isoformat() if d else None
 
 
+def _is_valid_uuid(s: str) -> bool:
+    """patients.id / users.id 在 PG 里都是 UUID 列;非 UUID 字符串直接给 SQLAlchemy
+    会抛 DataError(invalid input syntax for type uuid),让上游 500。
+    评测脚本 / 旧 session 可能带非 UUID 的伪 ID,这里前置校验,非 UUID 当"无此患者"处理。"""
+    try:
+        uuid.UUID(str(s))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def load_medical_history(user_id: str) -> dict:
     """从 PG 加载结构化病史档案(spec §4.1.1 medical_history 字段)。
 
     `user_id` 即 `patients.id`(spec §2.4.5:patients 1:1 users)。
+    非 UUID 字符串(如评测脚本伪造的 'p1' / 'patient1')直接返空档案,不抛异常。
     """
+    if not _is_valid_uuid(user_id):
+        _logger.debug("load_medical_history(%s) — 非 UUID,返空档案", user_id)
+        return _empty_history()
     with session_scope() as s:
         patient: Patient | None = s.get(Patient, user_id)
 
@@ -59,6 +80,14 @@ def load_medical_history(user_id: str) -> dict:
         if patient is None:
             _logger.debug("load_medical_history(%s) — patient 行不存在,返空档案", user_id)
             return _empty_history()
+
+        # ④ select_symptom 用 basic_info.gender 判断是否强制问妊娠/哺乳;
+        # Patient 行已 load,直接 return 主表字段不增加 query。
+        basic_info = {
+            "gender": patient.gender,
+            "birth_date": _date_to_iso(patient.birth_date),
+            "name": patient.name,
+        }
 
         personal_history = {
             "smoking_status": patient.smoking_status,
@@ -196,6 +225,7 @@ def load_medical_history(user_id: str) -> dict:
             }
 
         return {
+            "basic_info": basic_info,
             "past_history": past_history,
             "allergy_history": allergy_history,
             "medication_history": medication_history,
@@ -208,8 +238,13 @@ def load_medical_history(user_id: str) -> dict:
 def load_initial_exam_reports(user_id: str) -> list[dict]:
     """加载患者已上传的检查报告文件引用(spec §4.1.1 exam_reports 字段)。
 
+    非 UUID 直接返空(与 load_medical_history 一致)。
+
     Returns: `list[{"file_ref": str, "report_type": str, "report_date": str | None}]`
     """
+    if not _is_valid_uuid(user_id):
+        _logger.debug("load_initial_exam_reports(%s) — 非 UUID,返空", user_id)
+        return []
     with session_scope() as s:
         rows = s.execute(
             select(ExamReport).where(ExamReport.patient_id == user_id)
@@ -228,6 +263,7 @@ def load_initial_exam_reports(user_id: str) -> list[dict]:
 
 def _empty_history() -> dict:
     return {
+        "basic_info": {"gender": None, "birth_date": None, "name": None},
         "past_history": {"medical_history": [], "surgical_trauma": [], "transfusion": []},
         "allergy_history": [],
         "medication_history": [],
