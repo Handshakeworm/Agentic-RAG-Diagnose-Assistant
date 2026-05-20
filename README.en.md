@@ -50,7 +50,7 @@
 
 ## Highlights
 
-> _Detailed in Chinese README §设计亮点 — 12 highlights covering full-stack ownership, multi-route RRF with multi-vector indexing, Small-to-Big parent/child chunking, single-GPU 16GB shared Embedding+Reranker, multimodal ingestion (text + tables + figures), LLM capability routing, idempotency + runtime degradation, 13-dimension HPI structured proactive questioning, three-step diagnosis chain with full-chain fallback, Safety Gate as hard rail, 15-field `rag_trace` audit, centralized runtime constants (`agent_limits`)._
+> _Detailed in Chinese README §设计亮点 — 12 highlights covering full-stack ownership, multi-route RRF with multi-vector indexing, Small-to-Big parent/child chunking, single-GPU 16GB shared Embedding+Reranker, multimodal ingestion (text + tables + figures), LLM capability routing, idempotency + runtime degradation, 13-dimension HPI structured proactive questioning, single-LLM diagnosis with failure fallback (3-step chain retired per RAG eval — single-step achieves the same top1 93.5% / top3 100% at half the latency), Safety Gate as hard rail, 15-field `rag_trace` audit, centralized runtime constants (`agent_limits`)._
 
 ---
 

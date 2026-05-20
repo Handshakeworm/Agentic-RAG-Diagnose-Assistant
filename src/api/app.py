@@ -15,7 +15,10 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from config.logging_config import configure_logging
@@ -29,6 +32,10 @@ from src.db.postgres.metrics import install_engine_metrics
 
 _API_TITLE = "Agentic RAG Medical Care Assistant API"
 _API_VERSION = "0.1.0"
+
+# /ui 静态前端目录(portfolio 演示用,见 ui/index.html)。同源挂载避免 CORS,
+# 也让前端可以直接 `fetch('/auth/login')` 而不用配 base URL。
+_UI_DIR = Path(__file__).resolve().parents[2] / "ui"
 
 # §5.2.1 ② 末:`/metrics` 端点排除 `/healthz`/`/readyz`/`/metrics` 自身避免自污染。
 # G1 还没有 /healthz /readyz(H8 才建),但 instrumentator 配置里先列上,等 H8
@@ -70,6 +77,12 @@ def create_app() -> FastAPI:
     app.add_middleware(TraceIdMiddleware)
 
     register_routers(app)
+
+    # /ui 前端(演示用,可选;目录不存在则跳过以免开发期没建报错)
+    if _UI_DIR.is_dir():
+        app.mount(
+            "/ui", StaticFiles(directory=str(_UI_DIR), html=True), name="ui"
+        )
 
     return app
 

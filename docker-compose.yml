@@ -202,6 +202,11 @@ services:
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - /data/volumes/prometheus:/prometheus
+    # 允许容器内通过 host.docker.internal 访问宿主机(Linux Docker 需要 host-gateway 才能解析)。
+    # 用途:dev 时 prometheus 抓宿主机 uvicorn(localhost:8000) 的 /metrics,
+    # 用于在 docker 镜像未 build 前先看到本地代码的运行指标(见 prometheus.yml `api-dev` job)。
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - main
     restart: unless-stopped

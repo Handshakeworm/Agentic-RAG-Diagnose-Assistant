@@ -74,7 +74,7 @@
 |---|---|
 | 数据处理 / RAG | • MinerU 解析 13 本医学教材(264948 文档块),每本教科书专配一套脚本精细化清洗切分<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块 (12/13 本零边界丢失)<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
 | Embedding / Reranker | • Qwen3-Embedding-8B(8.5GB)+ BGE-Reranker-v2-minicpm-layerwise(2.6GB) INT8 量化单卡 16GB 共显<br>• 精排 layerwise 早退加速;失败 / 超时回退到召回原序 |
-| Agent | • LangGraph 16 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:候选范围按 `空维度优先填 → TF-IDF 抽 chunk 关键词 → LLM 批量去重 + 报告证据消费 → 二元熵信息增益贪心选剩余症状 → LLM 可问性评估滤掉必须查体的体征 → 增益 < 0.15 阈值早退转诊断` 逐轮收敛,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断三步串联(证据 → 排序 → 输出),任一步多次重试失败就早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本 16 处结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 |
+| Agent | • LangGraph 15 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:④ 节点 1 LLM 调用同时出追问(slot 维度填补 + open 开放式兜底)+ unaskable 粗筛,信息已足时直接跳诊断,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断 1 步 LLM 出 ranking + retained_unaskable(对齐 RAG 评测口径 top1 93.5%),失败重试 3 次仍报错则早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 + ⑩ 诊断推理(原生多模态) |
 | 后端 | • FastAPI + JWT 实现注册 / 登录 / 角色守卫<br>• 限流先抽象后实现:单机内存版可换多副本 Redis 共享版,业务代码不动<br>• PostgreSQL 20 表 + Alembic 6 次迁移<br>• 每次问诊同事务写响应 + 15 字段审计链路(90 天保留) |
 | 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
 | 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 342 单元 + 71 集成 PASS |
@@ -166,24 +166,27 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 | 程度 | `severity` | 治疗反应 | `treatment_response` |
 | 时间规律 | `duration_pattern` | | |
 
-**逐轮缩小候选范围的 4 步算法**(节点 ⑤ `select_discriminative_symptom`):
+**1 次 LLM 同时出追问 + unaskable 粗筛**(节点 ④ `select_discriminative_symptom`):
 
-1. **空维度优先(配额 ≤ 2)**:对比已填 vs 未填 13 维,LLM 选最有鉴别价值的空维度先问
-2. **关键词归一化(④ `extract_symptoms`,零 LLM)**:`sklearn TfidfVectorizer` char_wb 2-4 gram 抽 RAG 召回 chunk 的 TF-IDF Top-30 关键词 → 三层归一化(精确别名 → 向量 cosine ≥ 0.92 → 占位)
-3. **二元熵信息增益贪心**:对剩余症状按二元熵排序候选,逐个 LLM 评估"患者能自述 vs 必须查体"(可问性),不能问的进 `unaskable_symptoms` 留诊断节点参考
-4. **阈值早退**:症状级最高增益 < `ASKABLE_GAIN_THRESHOLD = 0.15`(§9.7)→ 清空追问 → 转 ⑩ `diagnose`;追问轮次也有硬上限 `MAX_FOLLOWUP_ROUNDS = 8` 兜底
+1. **输入**:13 维 HPI 已填 / 空缺 + 已确认/否认/不确定症状 + 主诉 + 现病史
+2. **LLM 任务 1 — `questions`**(≤ `MAX_FOLLOWUP_QUESTIONS=5`,可为 0):
+   - `type="slot"`:从空缺维度里挑诊断价值最高且 patient-answerable 的(时间/部位/性质/诱因/缓解等)
+   - `type="open"`:开放式问"还有别的不舒服吗?"(一轮最多 1 条)
+   - 信息已足时返空 → `should_continue` 路由跳诊断
+3. **LLM 任务 2 — `unaskable_symptoms`**(≤ 5,可为 0):"想知道但患者答不上的体征"粗筛(`{description, reason}`),后续 ⑩ 基于诊断结果精筛覆盖
+4. **追问硬上限**:`MAX_FOLLOWUP_ROUNDS=8` 兜底,触顶 → ⑩ Step -1 短路出 `insufficient`
 
-医学侧的产品差异化 — 自由文本 LLM 助手做不到这种结构化主诉收敛。
+> 原"TF-IDF + 信息增益 + 可问性评估"4 步算法(④ `extract_symptoms` + ⑤ 4 LLM)整体废弃 — 实测 TF-IDF 抽出 94% 是医学教材通用高频词,信息增益的可比 key 立不起来。改 LLM 1 次基于 state 直接选,利用 LLM 内化的医学鉴别诊断知识。详见 [EL_DESIGN_REVIEW §11](EL_DESIGN_REVIEW.md)。
 
-### 9. 三步诊断链 + 整链路兜底
+### 9. 1 步诊断推理 + 失败兜底
 
-⑩ `diagnose` 节点做的不是"一次 LLM 出诊断",而是 **三步链**:
+⑩ `diagnose` 1 LLM 调用直接出 `DiagnosisOutput`(原生多模态 DashScope qwen3.5-plus,对齐 RAG 评测口径):
 
-1. `EvidenceSheet` — 从 reranked chunks 提取候选疾病及其支持/反对证据
-2. `DiagnosisRanking` — 基于证据表做鉴别诊断排序 + unaskable 条件推理
-3. `DiagnosisOutput` — 用原始事实交叉验证,校准概率与标签一致性
+- **输入**:全量患者画像(主诉 + 现病史 + 13 维 slots + 已确认/否认/不确定症状 + 病史摘要 + 报告发现)+ 文献父块全文 + figure 多模态截图 + ④ 粗筛 unaskable
+- **输出**:`results: list[RankedDisease]`(每项含 `disease/probability/evidence/differentiation/differentiation_type`)+ `retained_unaskable`(基于诊断结果精筛后覆盖 state,供 ⑧a 消费)
+- **失败兜底**:LLM 重试 3 次仍失败 → 出 `insufficient` 并写 `failure_reason="step_1_structured_output_failed: ..."`;还有 Step -1 在 `followup_round >= MAX_FOLLOWUP_ROUNDS` 时直接短路
 
-任一步重试 3 次仍失败 → 整链短路到 `insufficient` 并写 `failure_reason="step_{N}_structured_output_failed: ..."`,**不允许把部分/空的中间结果喂给下一步**。⑩ 还有 Step -1 在 `followup_round >= MAX_FOLLOWUP_ROUNDS` 时直接短路。详见 [DEV_SPEC §4.1.2 ⑩](DEV_SPEC.md#41-agent工作流) + [§9.1 / §9.3](DEV_SPEC.md#9-全局实现契约跨章节)。
+> 原"3 步链(`EvidenceSheet → DiagnosisRanking → DiagnosisOutput`)"整体废弃 — 评测证明 1 步 LLM + 信息全给已经能拿 top1 93.5% / top3 100%,3 步链让总延迟 4-6 分钟、且 Step 3"概率校准"是伪能力(同款 LLM 自校自不会本质改变判断)。详见 [DEV_SPEC §4.1.2 ⑩](DEV_SPEC.md#41-agent工作流) + [§9.1 / §9.3](DEV_SPEC.md#9-全局实现契约跨章节)。
 
 ### 10. Safety Gate 作为硬性安全闸
 
@@ -201,7 +204,7 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 
 ### 12. 运行时常量集中管理(§9.7 `agent_limits`)
 
-7 个阈值与硬上限(追问 / 复检轮次封顶、RRF 截断、信息增益门槛、实体链接相似度、Reranker 早退层数等)统一在 `pydantic_settings.BaseSettings`,环境变量前缀 `AGENT_*` 可调,业务代码必须 `from config.settings import settings` 读取,**禁止模块级 `MAX_X = 8`**。调参改 `.env` 不改代码。完整清单见 [DEV_SPEC §9.7](DEV_SPEC.md#9-全局实现契约跨章节)。
+7 个阈值与硬上限(`MAX_FOLLOWUP_ROUNDS=8` / `MAX_EXAM_ROUNDS=3` / `MAX_FOLLOWUP_QUESTIONS=5` / `RETRIEVE_TOP_N=200` / `RERANKER_CUTOFF_LAYERS=None` 全 40 层 / `RETRIEVE_PARENT_FIGURE_CAP=5` 同节图表封顶 / `RRF_DENSE_WEIGHT_FACTOR=5` 加权融合)统一在 `pydantic_settings.BaseSettings`,环境变量前缀 `AGENT_*` 可调,业务代码必须 `from config.settings import settings` 读取,**禁止模块级 `MAX_X = 8`**。调参改 `.env` 不改代码。完整清单见 [DEV_SPEC §9.7](DEV_SPEC.md#9-全局实现契约跨章节)。
 
 ---
 
@@ -294,15 +297,14 @@ graph TD;
     N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
     N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N4("④ extract_symptoms<br/><i>症状提取 TF-IDF(零 LLM)</i>")
-    N5("⑤ select_discriminative_symptom<br/><i>维度缺口优先 + 选择高区分度追问症状</i>")
-    N6("⑥a generate_followup<br/><i>生成追问问题</i>")
-    N6b("⑥b wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
+    N4("④ select_discriminative_symptom<br/><i>优先追问13维slot空缺+开放症状询问,后LLM构建高价值可问症状</i>")
+    N5("⑤ generate_followup<br/><i>生成追问问题</i>")
+    N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
     N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
     N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
     N9("⑨ process_exam_result<br/><i>处理检查结果回传</i>")
-    N10("⑩ diagnose<br/><i>诊断推理（Cross-Encoder 截断 + 三步分阶段 LLM 推理）</i>")
+    N10("⑩ diagnose<br/><i>诊断推理(可选 Cross-Encoder 截断 + 父块扩展 + 多模态 LLM 一步出结果)</i>")
     N11("⑪ safety_gate<br/><i>安全约束门控（规则+LLM）</i>")
     N12("⑫ generate_advice<br/><i>生成建议</i>")
     N13("⑬ format_response<br/><i>格式化最终回复</i>")
@@ -313,11 +315,10 @@ graph TD;
     N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
     N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
     N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
-    N4 -->|"TF-IDF 关键词提取"| N5;
-    N5 -.->|"followup_questions 非空 → 继续追问"| N6;
-    N5 -.->|"followup_questions 为空 → 进入诊断"| N10;
-    N6 -->|"生成问题写入State"| N6b;
-    N6b -->|"interrupt等待用户回答"| N7;
+    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
+    N4 -.->|"followup_questions 为空 → 进入诊断"| N10;
+    N5 -->|"生成问题写入State"| N6;
+    N6 -->|"interrupt等待用户回答"| N7;
     N7 -->|"更新症状,重新召回"| N2;
     N8 -->|"生成建议写入State"| N8b;
     N8b -->|"interrupt等待检查结果"| N9;
@@ -335,10 +336,10 @@ graph TD;
 
 > 易错点(实现时会反复遇到):
 >
-> - ⑥/⑧ 拆 `a`/`b` 两半,`interrupt()` 与 LLM 调用分离,resume 时 LLM 不会重发
+> - ⑧ 拆 `a`/`b` 两半,⑤+⑥ 也是分离设计(generate / wait),`interrupt()` 与 LLM 调用分离,resume 时 LLM 不会重发
 > - `should_continue` 是 **纯函数**,不允许写 state(cap 处理放在 ⑩ Step -1)
-> - ⑩ 三步链任一步失败 → 整链短路 `insufficient` + `failure_reason`
-> - `present_illness_slots` 13 维度,空槽驱动 ⑤ 维度追问
+> - ⑩ 1 步 LLM 失败 → 短路 `insufficient` + `failure_reason="step_1_structured_output_failed: ..."`
+> - `present_illness_slots` 13 维度,空槽驱动 ④ 维度追问
 
 ---
 
@@ -411,12 +412,12 @@ flowchart TD
 
     RRF --> AGG[多向量聚合<br/>by source_chunk_id<br/>同 chunk 跨向量得分求和]
     AGG --> TOP[Top-N 截断<br/>RETRIEVE_TOP_N=200]
-    TOP --> EXT[④/⑤ 症状提取与可问性]
+    TOP --> EXT[④ 智能追问选择<br/>1 LLM 出 questions + unaskable 粗筛]
     EXT -.多轮追问.-> BQ
 
     TOP --> RR[⑩ Step 0 Reranker<br/>BGE-MiniCPM layerwise<br/>失败 → 原序 fallback]
-    RR --> EXP[Context 扩展<br/>子→父 + 同节图表<br/>+ vector_hits 文本回带]
-    EXP --> DG[⑩ 三步诊断链]
+    RR --> EXP[Context 扩展<br/>子→父 + 同节图表]
+    EXP --> DG[⑩ 1 步 LLM 诊断<br/>原生多模态]
 
     classDef gpu fill:#dcfce7,stroke:#16a34a,color:#1a1a1a
     classDef key fill:#fef3c7,stroke:#d97706,color:#1a1a1a
@@ -614,7 +615,7 @@ LLM 给出的 4 个候选(按概率降序):
 ### 6. 评测局限(诚实展示)
 
 - **数据是执业医考题**(单主诊断为主 / 信息相对完整),**真实临床多病并发场景**复杂度更高;主诊断 100% 入 top-2,但多 gold case 的次诊断/合并症 LLM 不一定独立列出(case 062 麻疹给了"麻疹"但没单列"合并肺炎"作 candidate)
-- **评测为单轮**(`patient_text` 一次性输入),没跑 Agent 多轮追问;production 真实场景会有 ④/⑤/⑦ 节点产出 `confirmed_symptoms` / `medical_history` 信息,目前评测里这些字段空
+- **评测为单轮**(`patient_text` 一次性输入),没跑 Agent 多轮追问;production 真实场景会有 ④/⑤/⑥/⑦ 追问循环产出 `confirmed_symptoms` / `medical_history` 信息,目前评测里这些字段空
 - **gold 是教科书"初步诊断"答案**,带"可能性大" / "待除外" / "初步诊断:" 等不确定语气;Judge 已按"初步诊断"口径校准(忽略这类语气词)
 - **LLM Judge 评等价性**:DeepSeek 评 gold ↔ LLM 等价等级,本身有 LLM bias 风险;case-by-case 人工抽查显示评判合理(详见 [.eval/rag_eval/diagnose_judge/](.eval/rag_eval/diagnose_judge/))
 - **真实"误诊"** 只 1 例 — case 049 "慢性菌痢",LLM top1 给 "溃疡性结肠炎"(gold 在 top2 equivalent 命中);1 例 case 007 输尿管结石 LLM 一开始给 "肿瘤" 是合理临床歧义(B 超未见结石强回声 + 55 岁吸烟 → 倾向肿瘤),重跑后给出结石

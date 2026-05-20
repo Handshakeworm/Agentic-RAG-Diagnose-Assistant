@@ -31,6 +31,18 @@ scrape_configs:
       - targets: ["api:8000"]
         labels:
           service: api
+          source: docker  # 区分 dev / docker 两路指标,便于 Grafana 按 label 过滤
+
+  # ── 开发期:抓宿主机 uvicorn(localhost:8000)── 见 docker-compose.yml prometheus.extra_hosts
+  # 用途:本地起 `uvicorn src.api.app:app` 调试时,Prometheus 也能抓到指标,
+  # 而不必每次都 build docker 镜像。生产 deploy 时移除这一段(或保留也无害,target 单纯 down)。
+  - job_name: api-dev
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+        labels:
+          service: api
+          source: host-dev
 
   # ── Prometheus 自身 ─────────────────────────────────────────────────────
   - job_name: prometheus

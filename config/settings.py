@@ -114,6 +114,10 @@ class LLMSettings(BaseSettings):
         description="LLM API 密钥,必须由 .env 提供;缺失时立即抛 ValidationError(DEV_SPEC §8.3 A3)",
     )
     MODEL_NAME: str = "deepseek-v4-pro"
+    # 轻量变体,用于"对延迟敏感、对推理深度要求低"的节点 — 当前只有 ① info_collect
+    # 走它(主诉/HPI 结构化抽取,~500 tokens 输出,deepseek-v4-flash 比 -pro 快 2~3x)。
+    # 其余主链路节点继续走 MODEL_NAME。
+    FAST_MODEL_NAME: str = "deepseek-v4-flash"
     # thinking 模型 max_tokens 不设会"放飞自我"用满 default 上限,单次延迟拖到
     # 100s+;参考 enrichment.py 设 800 跑得很快。2048 是业务侧折中(含 thinking
     # 用完、JSON 输出 schema 嵌套较大也够),.env LLM_MAX_TOKENS 可覆盖。
