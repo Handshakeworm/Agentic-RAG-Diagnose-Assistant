@@ -19,7 +19,6 @@ prompt + raw_output 写入 State 供审计(spec §9.6.2)。
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 
@@ -294,7 +293,8 @@ def diagnose(state: MedicalState) -> dict:
     ctx = _build_diagnose_context(reranked_chunks, reranked_text)
 
     # ─── Step 1: 1 步 LLM(原生多模态,DashScope qwen3.5-plus)───
-    history_summary = json.dumps(state.medical_history, ensure_ascii=False)[:600]
+    # medical_history 不再 json 截断:build_diagnose_prompt 内部用 _format_medical_history
+    # 结构化展开 8 个子项,空字段显式标"未询问 ≠ 阴性"(对齐评测口径)
     slots_dict = state.present_illness_slots.model_dump()
 
     vision_llm = get_llm(
@@ -315,7 +315,7 @@ def diagnose(state: MedicalState) -> dict:
         denied_symptoms=state.denied_symptoms,
         uncertain_symptoms=state.uncertain_symptoms,
         slots=slots_dict,
-        history_summary=history_summary,
+        medical_history=state.medical_history,
         report_findings=state.report_findings,
         unaskable_symptoms=state.unaskable_symptoms,
     )

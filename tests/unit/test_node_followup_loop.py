@@ -138,3 +138,73 @@ def test_process_followup_llm_failure_raises(mock_llm_factory):
     s.followup_questions = [{"type": "open"}]
     with pytest.raises(ValueError):
         process_followup_answer(s)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# obstetric_fills 回写 state.medical_history.obstetric_history
+# (⑪ safety_gate 妊娠/哺乳禁忌兜底硬依赖)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+@patch("src.agent.nodes.process_followup.get_llm")
+def test_process_followup_obstetric_pregnant_writes_history(mock_llm_factory):
+    """obstetric_fills.is_pregnant=true → 写回 medical_history.obstetric_history,
+    pregnancy_status='pregnant' 供 ⑪ safety_gate 规则层读取。"""
+    from src.agent.nodes.process_followup import process_followup_answer
+
+    mock_chain = mock_llm_factory.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = FollowupParseResult(
+        obstetric_fills={"is_pregnant": True, "is_lactating": False},
+    )
+
+    s = create_initial_state(patient_id="P", patient_input="x")
+    s.followup_answer = "怀孕 3 个月了,没在哺乳"
+    s.followup_questions = [{"type": "obstetric"}]
+    s.medical_history = {"obstetric_history": None}
+
+    update = process_followup_answer(s)
+    ob = update["medical_history"]["obstetric_history"]
+    assert ob["is_pregnant"] is True
+    assert ob["pregnancy_status"] == "pregnant"  # ⑪ safety_gate 读这个字段
+    assert ob["is_lactating"] is False
+    assert ob["lactation_status"] == "not_pregnant" or ob["lactation_status"] == "not_lactating"
+
+
+@patch("src.agent.nodes.process_followup.get_llm")
+def test_process_followup_no_obstetric_question_preserves_history(mock_llm_factory):
+    """无 obstetric 追问 → medical_history.obstetric_history 不变(透传)。"""
+    from src.agent.nodes.process_followup import process_followup_answer
+
+    mock_chain = mock_llm_factory.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = FollowupParseResult(
+        slot_fills={"trigger": "进食"},
+    )
+
+    s = create_initial_state(patient_id="P", patient_input="x")
+    s.followup_answer = "饭后疼"
+    s.followup_questions = [{"slot": "trigger", "type": "slot"}]
+    existing_history = {"obstetric_history": None, "basic_info": {"gender": "male"}}
+    s.medical_history = existing_history
+
+    update = process_followup_answer(s)
+    assert update["medical_history"] == existing_history
+
+
+@patch("src.agent.nodes.process_followup.get_llm")
+def test_process_followup_obstetric_null_answer_does_not_write(mock_llm_factory):
+    """回答不明 → obstetric_fills 两 key 都 null → 不写回(避免污染档案)。"""
+    from src.agent.nodes.process_followup import process_followup_answer
+
+    mock_chain = mock_llm_factory.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = FollowupParseResult(
+        obstetric_fills={"is_pregnant": None, "is_lactating": None},
+    )
+
+    s = create_initial_state(patient_id="P", patient_input="x")
+    s.followup_answer = "不知道"
+    s.followup_questions = [{"type": "obstetric"}]
+    s.medical_history = {"obstetric_history": None}
+
+    update = process_followup_answer(s)
+    # 两 key 都 null → 不应该 fabricate obstetric_history
+    assert update["medical_history"].get("obstetric_history") is None

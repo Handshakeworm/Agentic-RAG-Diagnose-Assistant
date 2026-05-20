@@ -31,7 +31,7 @@ import time
 from config.settings import settings
 from src.agent.schemas.ner import NERResult
 from src.agent.schemas.query_construction import QueryConstructionOutput
-from src.agent.state import MedicalState
+from src.agent.state import SLOT_UNKNOWN_SENTINEL, MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
 from src.models.llm_client import get_llm
 from src.prompts.agent import (
@@ -201,6 +201,9 @@ def build_query(state: MedicalState) -> dict:
         if item is None:
             return
         s = item.strip()
+        # 哨兵值"(患者未明确)"是 ⑦ 标记"已问无答"的标签,不是症状词,扔给 BM25 只会污染召回
+        if s == SLOT_UNKNOWN_SENTINEL:
+            return
         if len(s) >= 2:
             sparse_queries.append(s)
 
@@ -235,8 +238,20 @@ def build_query(state: MedicalState) -> dict:
 
     # ─── Step 3: Query 构建(LLM)───
 
+    # 给 dense_query 改写 LLM 的 filled_slots:剥掉哨兵单值,多值列表过滤哨兵元素。
+    # 哨兵=已问无答,对检索改写没意义(诊断 prompt 那边会另带哨兵进 LLM 解释语义)
+    def _strip_sentinel(value):
+        if isinstance(value, list):
+            cleaned = [x for x in value if x and x != SLOT_UNKNOWN_SENTINEL]
+            return cleaned or None
+        if value == SLOT_UNKNOWN_SENTINEL:
+            return None
+        return value
+
     filled_slots = {
-        k: v for k, v in state.present_illness_slots.model_dump().items() if v
+        k: cleaned
+        for k, v in state.present_illness_slots.model_dump().items()
+        if v and (cleaned := _strip_sentinel(v))
     }
     history_summary = _summarize_history(state.medical_history)
 

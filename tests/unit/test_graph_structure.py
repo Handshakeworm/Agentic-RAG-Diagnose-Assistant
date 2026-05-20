@@ -5,14 +5,17 @@
 from __future__ import annotations
 
 
-def test_graph_has_all_15_nodes():
-    """④ 重设计后,④ extract_symptoms 节点已删,从 16 → 15。"""
+def test_graph_has_all_17_nodes():
+    """④ extract_symptoms 已删;新增 ⓪a initial_ask(START 并行)+ intake_followup_ask
+    (①.5 → ② 之间的入站追问),从 15 → 17 节点。"""
     from src.agent.graph import build_graph
 
     g = build_graph()
     expected = {
+        "initial_ask",
         "info_collect",
         "analyze_initial_reports",
+        "intake_followup_ask",
         "build_query",
         "retrieve",
         "select_discriminative_symptom",

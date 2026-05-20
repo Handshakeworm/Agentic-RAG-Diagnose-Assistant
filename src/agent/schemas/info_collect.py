@@ -34,10 +34,46 @@ class PresentIllnessSlots(BaseModel):
 
 
 class InfoCollectOutput(BaseModel):
-    """① info_collect Step 1 LLM 输出。"""
+    """① info_collect LLM 输出。
 
-    chief_complaint:       str = Field(..., description="主诉(主要症状+持续时间),如'腹痛3天'")
-    present_illness:       str = Field(..., description="现病史自由文本(本次发病的详细展开)")
+    本节点单次 LLM 同时处理两路输入,因此输出含两组字段:
+      - **patient_input 抽取**:`chief_complaint` / `present_illness` / `present_illness_slots`
+      - **⓪a form 答案解析**:`history_fills` / `obstetric_fills` / `new_symptoms`
+        (form 含 type=open 时填 new_symptoms;type=history 时填 history_fills;
+         type=obstetric 时填 obstetric_fills;无对应 type 则保持默认空)
+
+    合并是为了让"⓪a → ⑦ → ①"链路压成"⓪a → ①"一次 LLM 调用 —— ⑦ 在首轮 to_info_collect
+    路径上的工作完全可以由 ① 一并做掉,职责更内聚。
+    """
+
+    # ─── patient_input 抽取(主诉 / HPI) ───
+    chief_complaint:       str = Field(..., description="主诉(主要症状+持续时间),如'腹痛3天';来自 patient_input")
+    present_illness:       str = Field(..., description="现病史自由文本(本次发病的详细展开);来自 patient_input")
     present_illness_slots: PresentIllnessSlots = Field(
-        ..., description="现病史结构化槽位,与 present_illness 同步填充"
+        ..., description="现病史结构化槽位,与 present_illness 同步填充;主要来自 patient_input,form 答案附带的细节也可填入"
+    )
+
+    # ─── ⓪a form 答案解析(原 FollowupParseResult 同构,只是 ① 节点合并承担) ───
+    new_symptoms: list[str] = Field(
+        default_factory=list,
+        description="⓪a form 的 open 题里患者主动提到的额外症状(主诉之外),也包括患者顺带补充的副症状",
+    )
+    obstetric_fills: dict[str, bool | None] | None = Field(
+        None,
+        description=(
+            "仅当 ⓪a form 含 type=obstetric 时填,key ∈ {is_pregnant, is_lactating},"
+            "value=true(确认)/ false(明确否认)/ None(回答不明)。"
+            "节点会写回 state.medical_history['obstetric_history'],供 ⑪ safety_gate 使用。"
+        ),
+    )
+    history_fills: dict[str, list[str]] | None = Field(
+        None,
+        description=(
+            "仅当 ⓪a form 含 type=history 时填(入站病史采集)。三段扁平 list[str]:"
+            "  - allergies:过敏原名"
+            "  - medications:在用/长期用药名"
+            "  - past_conditions:既往疾病名"
+            "节点按 patient_repo.load_medical_history 的字段映射追加到 medical_history 对应表。"
+            "患者回答'无'/'没有'→ 三段空 list(显式区分'已问无答' vs '未问')。"
+        ),
     )

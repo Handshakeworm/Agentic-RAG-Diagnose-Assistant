@@ -94,15 +94,35 @@ def _call_smart_followup(state: MedicalState) -> SmartFollowupOutput:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def select_discriminative_symptom(state: MedicalState) -> dict:
-    """1 次 LLM 同时出 3 件事:追问项 + unaskable 粗筛 + 信息增益占位。
+def _needs_obstetric_force_ask(state: MedicalState) -> bool:
+    """首诊女性 + 档案无 obstetric → 强制问妊娠/哺乳。
 
-    - `followup_questions`:追问项(slot 维度补全 / open 开放式);空 → 路由跳诊断
+    Why: ⑪ safety_gate 规则层硬依赖 `obstetric_history.pregnancy_status` /
+    `lactation_status` 才能触发妊娠禁忌兜底。生产里 obstetric 子表的写入路径
+    要么靠 App 端 PUT /me/obstetric 主动填,要么靠这里强制追问 — 不问就永远 None。
+
+    只在 followup_round == 0(首诊轮)强制问一次,避免患者回答不明时反复追问。
+    """
+    if state.followup_round != 0:
+        return False
+    history = state.medical_history or {}
+    basic = history.get("basic_info") or {}
+    if basic.get("gender") != "female":
+        return False
+    return history.get("obstetric_history") is None
+
+
+def select_discriminative_symptom(state: MedicalState) -> dict:
+    """1 次 LLM 同时出 3 件事:追问项 + unaskable 粗筛 + obstetric 强制问。
+
+    - `followup_questions`:追问项(slot 维度补全 / open 开放式 / obstetric 妊娠哺乳);空 → 路由跳诊断
     - `unaskable_symptoms`:LLM 想知道但患者答不上的体征/指标(粗筛版),
       ⑩ 会基于诊断结果再次校准并覆盖此字段
+    - 首诊女性 + obstetric 档案空 → **强制 prepend 1 条 obstetric 追问**,
+      让 ⑪ safety_gate 妊娠禁忌兜底能在本会话内生效
     """
     result = _call_smart_followup(state)
-    # 边界校验:slot type 必须带 slot 名;open type 不带
+    # 边界校验:slot type 必须带 slot 名;open/obstetric 不带 slot
     followup_questions: list[dict] = []
     for q in result.questions:
         if q.type == "slot":
@@ -111,7 +131,11 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
             followup_questions.append({"type": "slot", "slot": q.slot})
         elif q.type == "open":
             followup_questions.append({"type": "open"})
-    # 截到 quota(LLM 已经约束 max_length=5 但兜底再截)
+        # LLM 不应该自己产 obstetric type — 那是节点入口强制 prepend 的,见下
+    # 强制 obstetric 追问 prepend 到最前(诊前安全兜底优先级最高)
+    if _needs_obstetric_force_ask(state):
+        followup_questions.insert(0, {"type": "obstetric"})
+    # 截到 quota(LLM 已经约束 max_length=5 但兜底再截;obstetric 必在,挤掉末尾 LLM 项)
     followup_questions = followup_questions[: settings.agent_limits.MAX_FOLLOWUP_QUESTIONS]
     # unaskable 粗筛同样兜底截到 quota
     unaskable: list[dict] = [u.model_dump() for u in result.unaskable_symptoms]
@@ -119,4 +143,6 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
     return {
         "followup_questions": followup_questions,
         "unaskable_symptoms": unaskable,
+        # 标记追问来源:⑦ 翻译完后 post_followup_router 据此决定 → ② 回检索(不 loop 回 ⑤)
+        "followup_source": "diagnostic",
     }

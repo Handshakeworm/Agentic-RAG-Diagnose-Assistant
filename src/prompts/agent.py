@@ -44,28 +44,68 @@ _JSON_TAIL = "\n\n请严格按 JSON 格式输出,所有字段值与上述 schema
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def build_info_collect_prompt(patient_input: str) -> str:
-    """① info_collect Step 1:从 patient_input 提取主诉 + 现病史 + 13 维槽位。
+def build_info_collect_prompt(
+    patient_input: str,
+    initial_form_question: str = "",
+    initial_form_answer: str = "",
+) -> str:
+    """① info_collect:一次 LLM 同时处理 patient_input + ⓪a 综合 form 答案。
 
-    输出由 `InfoCollectOutput` schema 严格约束,LLM 只需聚焦"提取什么、不
-    提取什么"。
+    输出由 `InfoCollectOutput` schema 严格约束,字段分两组:
+      - 从 patient_input 抽:chief_complaint / present_illness / present_illness_slots
+      - 从 ⓪a form 答案抽:history_fills / obstetric_fills / new_symptoms
     """
+    has_form = bool((initial_form_question or "").strip()) and bool(
+        (initial_form_answer or "").strip()
+    )
+    form_block = (
+        f"""
+
+【⓪a 综合 form 问答(open + history + obstetric,若女性)】
+问:
+{initial_form_question}
+
+答:
+{initial_form_answer}
+"""
+        if has_form
+        else ""
+    )
+    form_extraction_lines = (
+        """
+4. new_symptoms:**从 ⓪a form 的 open 题答案** 抽出患者额外提到的症状(主诉之外的副症状);
+   患者顺带补充的也算。
+5. history_fills(仅 form 含 history 题时):
+   - allergies: 过敏原名,如 ["青霉素", "海鲜"]
+   - medications: 在用/长期用药名,如 ["氯沙坦"]
+   - past_conditions: 既往疾病名,如 ["高血压", "糖尿病"]
+   - 患者明确答"无 / 没有 / 都没有"→ 三段都填 []  (显式区分"已问无答" vs "未问")
+   - 患者没答这部分 → 字段保持 null
+6. obstetric_fills(仅 form 含 obstetric 题时,且患者为女性):
+   - is_pregnant: true / false / null(回答不明)
+   - is_lactating: true / false / null
+   - 患者没答这部分 → 字段保持 null
+"""
+        if has_form
+        else ""
+    )
+
     return f"""你是医院分诊台问诊助手。下面是患者的自述。请仅从该自述中提取本次就诊的信息,
 **不要自行编造、不要泛化、不要补充未提及的内容**。
 
 【患者自述】
-{patient_input}
-
+{patient_input}{form_block}
 【提取要求】
-1. chief_complaint(主诉):主要症状 + 持续时间,1 句话,例:"腹痛3天"
+1. chief_complaint(主诉):主要症状 + 持续时间,1 句话,例:"腹痛3天" —— **来源限 patient_input**
 2. present_illness(现病史):用 1-3 句话展开本次发病的:起病时间、诱因、症状特点
-   (部位/性质/程度)、伴随症状、加重/缓解因素、治疗经过
-3. present_illness_slots(13 维结构化槽位):
+   (部位/性质/程度)、伴随症状、加重/缓解因素、治疗经过 —— **主要来源 patient_input**
+3. present_illness_slots(13 维结构化槽位)—— **主要来源 patient_input**,form 答案附带的细节
+   也可填入:
    - 单值槽(str | None):onset_time / onset_mode / trigger / location / nature /
      severity / duration_pattern / progression / treatment_tried / treatment_response
    - 多值槽(list[str]):aggravating(加重因素) / relieving(缓解因素) /
      associated_symptoms(伴随症状)
-   - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**
+   - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**{form_extraction_lines}
 
 注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。""" + _JSON_TAIL
 
@@ -207,6 +247,8 @@ def build_smart_followup_prompt(
 
 【已填的 HPI 维度】
 {filled_block}
+(若某维度 value 为 "(患者未明确)" 或列表含此值,表示**已问过但患者答不上**;
+ 视为该维度信息已采集完毕,**不要重复追问**;诊断推理时把它当作"患者明确否认/不知"看待)
 
 【空缺的 HPI 维度】(13 维框架内尚未问到的)
 {empty_block}
@@ -256,13 +298,30 @@ def build_followup_question_prompt(
     confirmed_symptoms: list[str],
     denied_symptoms: list[str],
 ) -> str:
-    """⑤ 生成两种 type(slot 维度填补 + open 开放式)追问问题,患者口语风格。"""
+    """⑤ 生成多种 type 追问问题,患者口语风格。
+
+    支持的 type:
+      - slot       : 补全 HPI 13 维空槽
+      - open       : 开放式兜底("还有别的不舒服吗")
+      - obstetric  : 首诊女性强制问妊娠/哺乳(④ / ⓪a 都可能产出)
+      - history    : 入站病史采集(过敏 / 慢病 / 长期用药,⓪a 产出)
+      - targeted   : intake_followup_ask LLM 针对性阶段产出,question 字段已是完整问句直接透传
+    """
     items = []
     for q in questions:
         if q.get("type") == "slot":
             items.append(f"  - 补全 HPI 维度:{q['slot']}")
         elif q.get("type") == "open":
             items.append("  - 开放式问:还有没有别的地方不舒服")
+        elif q.get("type") == "obstetric":
+            items.append("  - 妊娠/哺乳状态(必问,关系到用药安全):问患者目前是否怀孕、是否在哺乳期")
+        elif q.get("type") == "history":
+            items.append("  - 病史采集:过敏史(食物/药物)、慢性疾病、长期服用药物 — 三项请并起来一次问")
+        elif q.get("type") == "targeted":
+            # LLM 已经生成完整问句,直接当指令交给 ⑤ 自然过渡进文本
+            text = q.get("question") or q.get("text") or ""
+            if text:
+                items.append(f"  - 针对性追问(原句:{text})")
     items_block = "\n".join(items) if items else "  (无)"
 
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
@@ -283,6 +342,11 @@ def build_followup_question_prompt(
 - 维度补全(slot):用"是什么情况下/怎样的/最近有没有变化"等口语表达,不要直接说"诱因/性质"
   这类医学术语
 - 开放式追问(open):自然问"除了上面说的,还有没有别的地方不舒服?" — 用于兜底捕获遗漏症状
+- 妊娠/哺乳(obstetric):用关切语气先解释"为了用药安全,需要先确认一下" + 问"您当前是否怀孕、
+  最近有没有在哺乳?";**这一问必须出现且不能省略**,否则用药环节无法兜底
+- 病史采集(history):说"为了用药安全先了解下您的基础情况" + 一次问完三件事
+  "您有没有食物/药物过敏?有没有长期吃的药?有没有高血压糖尿病这类慢性病?"(可省略举例)
+- 针对性追问(targeted):原句已经是医生口语化好的问题,可直接转用或微调,不要改变追问对象
 - 控制在 2-3 句以内
 - 涉及隐私/心理症状要用委婉表达"""
 
@@ -297,14 +361,48 @@ def build_followup_parse_prompt(
     followup_answer: str,
     questions: list[dict],
 ) -> str:
-    """⑦ 解析患者回答 → 维度槽位回填 + 新症状提取。"""
+    """⑦ 解析患者回答 → 维度槽位回填 + 新症状提取 + 妊娠/哺乳 + 病史 history_fills。"""
     items_lines = []
+    has_obstetric = False
+    has_history = False
     for q in questions:
         if q.get("type") == "slot":
             items_lines.append(f"  - 补全 HPI 维度 {q['slot']}(回填到 slot_fills)")
         elif q.get("type") == "open":
             items_lines.append("  - 开放式问『还有别的不舒服』(新症状回填到 new_symptoms)")
+        elif q.get("type") == "obstetric":
+            has_obstetric = True
+            items_lines.append("  - 妊娠/哺乳状态(回填到 obstetric_fills)")
+        elif q.get("type") == "history":
+            has_history = True
+            items_lines.append("  - 入站病史采集:过敏/慢病/长期用药(回填到 history_fills)")
+        elif q.get("type") == "targeted":
+            items_lines.append(
+                "  - 针对性追问:新症状回填到 new_symptoms;若答案涉及具体 HPI 维度,顺手回填 slot_fills"
+            )
     items_block = "\n".join(items_lines) if items_lines else "  (无)"
+
+    obstetric_rule = ""
+    if has_obstetric:
+        obstetric_rule = """
+3. obstetric_fills(本轮含妊娠/哺乳追问时必填):
+   - key=is_pregnant:患者明确说"怀孕了"/"是的"→ true;明确说"没怀孕"/"不是"→ false;
+     回答含糊("不知道"/"没测"/未提及)→ null
+   - key=is_lactating:患者明确说"在哺乳"/"在喂奶"→ true;"不哺乳"/"没在喂"→ false;
+     未提及 → null
+   - **两个 key 都要出现**(即使 value 是 null),让下游知道"已问过"vs"没问过"
+   - 不含妊娠/哺乳追问的本轮 → obstetric_fills 字段缺省(不写)"""
+
+    history_rule = ""
+    if has_history:
+        history_rule = """
+4. history_fills(本轮含病史采集追问时必填,三段扁平 list[str]):
+   - allergies:过敏原名("青霉素"/"海鲜"/"花粉"),不含反应描述
+   - medications:在用或长期服用药物名("氯沙坦"/"二甲双胍"),不含剂量
+   - past_conditions:既往疾病名("高血压"/"糖尿病"/"胆囊炎史"),不含日期
+   - 患者明确说"无"/"没有"→ 三段全部 [];若只回答了一部分,其余按"未提及"→ []
+   - **三个 key 都要出现**(即使是空 list),让下游知道"已问过"
+   - 不含病史采集追问的本轮 → history_fills 字段缺省(不写)"""
 
     return f"""你是问诊回答解析助手。请把患者回答结构化。
 
@@ -322,11 +420,76 @@ def build_followup_parse_prompt(
    - 单值槽(onset_time/onset_mode/trigger/location/nature/severity/
      duration_pattern/progression/treatment_tried/treatment_response):value=str
    - 多值槽(aggravating/relieving/associated_symptoms):value=list[str]
-   - 槽位名必须是 HPI 13 维之一,不要新造槽名;患者没涉及的槽位**不要**出现在 slot_fills 里
+   - 槽位名必须是 HPI 13 维之一,不要新造槽名
+   - **本轮被询问到的 slot,患者明确答"不知道/不清楚/没注意/没有/无"等**否定或不知:
+     在 slot_fills 中写入哨兵值标记"已问无答",避免下游循环重问:
+       - 单值槽 value="(患者未明确)"
+       - 多值槽 value=["(患者未明确)"]
+     (不能省略不写,否则 intake 会反复重问;不能写空字符串,会被当成未填)
+   - 患者**完全没涉及**的槽位(没被问也没主动说)**不要**出现在 slot_fills 里
 2. new_symptoms:患者回答里**主动提到的症状**(无论是开放式问的回答,还是顺带补充);
    - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛"、"夜间盗汗")
    - 若回答只涉及维度填补、未提及任何新症状,则为空列表
-   - 已确认 / 已否认 / 不确定列表中的术语**不要**重复输出""" + _JSON_TAIL
+   - 已确认 / 已否认 / 不确定列表中的术语**不要**重复输出{obstetric_rule}{history_rule}""" + _JSON_TAIL
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# intake_followup_ask LLM 针对性阶段(13 维 slot 全填后调一次)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def build_targeted_followup_prompt(
+    chief_complaint: str,
+    present_illness: str,
+    filled_slots: dict,
+    confirmed_symptoms: list[str],
+    denied_symptoms: list[str],
+    uncertain_symptoms: list[str],
+    medical_history_summary: str,
+    quota: int,
+) -> str:
+    """intake_followup_ask LLM 阶段:基于已填 HPI + 病史,定还需追问什么临床细节。
+
+    严格约束:**只追问,不诊断**(prompt 内三段式禁令);TargetedFollowupOutput schema
+    的 questions 字段 max_length=5(quota 兜底)。
+    """
+    slots_block = "\n".join(f"  - {k}:{v}" for k, v in filled_slots.items()) or "  (无)"
+    confirmed_block = "、".join(confirmed_symptoms) or "(无)"
+    denied_block = "、".join(denied_symptoms) or "(无)"
+    uncertain_block = "、".join(uncertain_symptoms) or "(无)"
+
+    return f"""你是问诊追问助手,**只负责追问临床细节,不做诊断**。
+
+【当前已知】
+- 主诉:{chief_complaint}
+- 现病史:{present_illness}
+- HPI 13 维(已填部分):
+{slots_block}
+  (若某 value 为 "(患者未明确)" 或列表含此值:**已问过但患者答不上**,**不要再对该维度追问**;
+   可以围绕未问过的维度或更具体的临床细节追问)
+- 已确认症状:{confirmed_block}
+- 已否认症状:{denied_block}
+- 不确定症状:{uncertain_block}
+- 病史档案摘要:
+{medical_history_summary}
+
+【你的任务】
+看完上述信息后,判断**在进入检索之前**还需要向患者询问哪些**临床细节**(可能影响诊断推理的具体表现/体征/时序/伴随)。
+最多输出 {quota} 条追问,每条 1 个 question + 1 个 target 标签。
+
+【严格约束(违反即视为输出失败)】
+1. 禁止输出疾病名/诊断/可能性/probability/differential 等任何诊断性词汇
+2. 禁止做"我怀疑是 X"/"考虑 Y"/"可能性较高"的判断
+3. 只能问**具体临床表现/体征/时序**(发热温度、放射部位、加重缓解、伴随表现、过敏药物剂量等)
+4. 信息已经充分时,questions 输出空列表 [] — 不要硬凑
+
+【输出 schema】
+{{
+  "questions": [
+    {{"question": "<完整自然语言问句>", "target": "<英文短标签,如 fever / radiation / duration>"}},
+    ...
+  ]
+}}""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -398,6 +561,171 @@ def build_recommend_exam_prompt(
 # ────────────────────────────────────────────────────────────────────────────
 
 
+def _format_medical_history(history: dict) -> str:
+    """把 8 张患者子表 dict 格式化成结构化中文段落,供 ⑩ diagnose prompt 用。
+
+    设计原则(替代 json.dumps()[:600] 暴力截断):
+    - 每个子项独立一行,前缀 `· {中文名}:`
+    - 非空 → 列出具体内容
+    - 空 list / 空 dict / None → "(未询问 — 不代表阴性)"
+    - **绝不截断**:1M context 全给 LLM 看,对齐评测口径
+    - **空字段语义:未询问 ≠ 阴性**(当前 schema 无 is_denied 字段,
+      患者明确否认的信息暂时只能进 raw_text;LLM 应理解空字段为"信息缺失")
+    """
+    if not history:
+        return "(档案为空 — 患者首诊或未填档,所有维度均未询问,不代表阴性)"
+
+    lines: list[str] = []
+
+    # 既往疾病(嵌在 past_history 子 dict 里)
+    past = history.get("past_history") or {}
+    med_list = past.get("medical_history") or []
+    if med_list:
+        items = []
+        for r in med_list:
+            seg = r.get("condition") or "(未命名)"
+            extras = []
+            if r.get("diagnosed_at"):
+                extras.append(f"诊断{r['diagnosed_at']}")
+            if r.get("control_status"):
+                extras.append(f"控制:{r['control_status']}")
+            if r.get("notes"):
+                extras.append(r["notes"])
+            if extras:
+                seg += f"({'; '.join(extras)})"
+            items.append(seg)
+        lines.append("· 既往疾病:" + "; ".join(items))
+    else:
+        lines.append("· 既往疾病:(未询问 — 不代表阴性)")
+
+    # 手术/外伤史
+    surg = past.get("surgical_trauma") or []
+    if surg:
+        items = []
+        for r in surg:
+            seg = r.get("name") or "(未命名)"
+            if r.get("occurred_at"):
+                seg += f"({r['occurred_at']})"
+            if r.get("sequelae"):
+                seg += f"[后遗:{r['sequelae']}]"
+            items.append(seg)
+        lines.append("· 手术/外伤史:" + "; ".join(items))
+    else:
+        lines.append("· 手术/外伤史:(未询问 — 不代表阴性)")
+
+    # 输血史
+    trans = past.get("transfusion") or []
+    if trans:
+        items = []
+        for r in trans:
+            seg = r.get("blood_product") or "(未注明)"
+            if r.get("transfusion_date"):
+                seg += f"({r['transfusion_date']})"
+            if r.get("adverse_reaction"):
+                seg += f"[不良反应:{r.get('reaction_detail') or '有'}]"
+            items.append(seg)
+        lines.append("· 输血史:" + "; ".join(items))
+    else:
+        lines.append("· 输血史:(未询问 — 不代表阴性)")
+
+    # 过敏史(安全敏感)
+    allergies = history.get("allergy_history") or []
+    if allergies:
+        items = []
+        for r in allergies:
+            seg = r.get("substance") or "(未命名)"
+            if r.get("reaction"):
+                seg += f"→ {r['reaction']}"
+            if r.get("severity"):
+                seg += f"[{r['severity']}]"
+            items.append(seg)
+        lines.append("· 过敏史 ⚠️ :" + "; ".join(items))
+    else:
+        lines.append("· 过敏史 ⚠️ :(未询问 — 不代表阴性,safety_gate 无法兜底)")
+
+    # 用药史(safety_gate 用)
+    meds = history.get("medication_history") or []
+    if meds:
+        current_items, past_items = [], []
+        for r in meds:
+            seg = r.get("drug_name") or "(未命名)"
+            if r.get("dosage") or r.get("frequency"):
+                seg += f"({r.get('dosage') or ''} {r.get('frequency') or ''})".strip()
+            if r.get("is_current"):
+                current_items.append(seg)
+            else:
+                past_items.append(seg)
+        parts = []
+        if current_items:
+            parts.append("当前服用:" + "; ".join(current_items))
+        if past_items:
+            parts.append("既往用药:" + "; ".join(past_items))
+        lines.append("· 用药史 ⚠️ :" + " | ".join(parts))
+    else:
+        lines.append("· 用药史 ⚠️ :(未询问 — 不代表未服药)")
+
+    # 个人史(吸烟/饮酒/职业/暴露)— 内嵌在 patients 表
+    personal = history.get("personal_history") or {}
+    if personal:
+        bits = []
+        if personal.get("smoking_status"):
+            seg = f"吸烟:{personal['smoking_status']}"
+            if personal.get("smoking_pack_years"):
+                seg += f"({personal['smoking_pack_years']} 包年)"
+            bits.append(seg)
+        if personal.get("alcohol_status"):
+            seg = f"饮酒:{personal['alcohol_status']}"
+            if personal.get("alcohol_detail"):
+                seg += f"({personal['alcohol_detail']})"
+            bits.append(seg)
+        if personal.get("occupation"):
+            bits.append(f"职业:{personal['occupation']}")
+        if personal.get("occupational_exposure"):
+            bits.append(f"职业暴露:{personal['occupational_exposure']}")
+        if personal.get("travel_history"):
+            bits.append(f"旅居史:{personal['travel_history']}")
+        if personal.get("infectious_contact"):
+            bits.append(f"传染病接触:{personal['infectious_contact']}")
+        lines.append("· 个人史:" + (" | ".join(bits) if bits else "(字段全空)"))
+    else:
+        lines.append("· 个人史:(未询问 — 不代表阴性)")
+
+    # 婚育/月经史(女性)
+    ob = history.get("obstetric_history")
+    if ob:
+        bits = []
+        if ob.get("pregnancy_status"):
+            bits.append(f"孕:{ob['pregnancy_status']}")
+        if ob.get("lactation_status"):
+            bits.append(f"哺乳:{ob['lactation_status']}")
+        if ob.get("gravidity") is not None or ob.get("parity") is not None:
+            bits.append(f"孕产:G{ob.get('gravidity', '?')}P{ob.get('parity', '?')}")
+        if ob.get("last_menstrual_period"):
+            bits.append(f"末次月经:{ob['last_menstrual_period']}")
+        if ob.get("menopause_age"):
+            bits.append(f"绝经年龄:{ob['menopause_age']}")
+        if ob.get("notes"):
+            bits.append(ob["notes"])
+        lines.append("· 婚育/月经史:" + (" | ".join(bits) if bits else "(字段全空)"))
+    else:
+        lines.append("· 婚育/月经史:(未询问 — 男性可忽略;女性视情况补问)")
+
+    # 家族史
+    family = history.get("family_history") or []
+    if family:
+        items = []
+        for r in family:
+            seg = f"{r.get('relation', '亲属')}:{r.get('condition', '未命名')}"
+            if r.get("onset_age"):
+                seg += f"(发病{r['onset_age']}岁)"
+            items.append(seg)
+        lines.append("· 家族史:" + "; ".join(items))
+    else:
+        lines.append("· 家族史:(未询问 — 不代表阴性)")
+
+    return "\n".join(lines)
+
+
 def build_diagnose_prompt(
     *,
     parent_texts: list[str],
@@ -408,7 +736,7 @@ def build_diagnose_prompt(
     denied_symptoms: list[str],
     uncertain_symptoms: list[str],
     slots: dict[str, Any],
-    history_summary: str,
+    medical_history: dict,
     report_findings: list[dict],
     unaskable_symptoms: list[dict],
 ) -> tuple[list[BaseMessage], str]:
@@ -423,7 +751,8 @@ def build_diagnose_prompt(
         figures: Step 0.5 去重后的图表 chunk 列表,每条含 chunk_raw_text + image_data_uri
         chief_complaint / present_illness: 患者叙事(原文)
         confirmed_symptoms / denied_symptoms / uncertain_symptoms / slots /
-            history_summary / report_findings: 多轮 followup 累积的患者画像
+            medical_history / report_findings: 多轮 followup 累积的患者画像
+            (medical_history 由 _format_medical_history 结构化展开,空字段显式标"未询问")
         unaskable_symptoms: ④ 写入的粗筛版({description, reason}),供 LLM 产 retained_unaskable
     """
     # 父块文本:对齐评测口径,不截断(LLM 1M context,信息全给)
@@ -443,6 +772,7 @@ def build_diagnose_prompt(
     denied_block = "、".join(denied_symptoms) or "(无)"
     uncertain_block = "、".join(uncertain_symptoms) or "(无)"
     slots_block = json.dumps({k: v for k, v in slots.items() if v}, ensure_ascii=False)
+    history_block = _format_medical_history(medical_history)
     reports_block = json.dumps(report_findings[:5], ensure_ascii=False)[:1500]
     unaskable_block = json.dumps(unaskable_symptoms[:8], ensure_ascii=False) if unaskable_symptoms else "[]"
 
@@ -457,14 +787,16 @@ def build_diagnose_prompt(
 
 【现病史结构化维度】
 {slots_block}
+(若某维度 value 为 "(患者未明确)" 或列表含此值:**已问过但患者答不上**;
+ 视同"患者明确否认/不知",**不作为阳性证据**,可在 differentiation 里指出"此维度信息缺失,影响鉴别")
 
 【多轮交互累积的患者画像】
 - 已确认症状:{confirmed_block}
 - 已否认症状:{denied_block}
 - 已问但不确定的症状:{uncertain_block}
 
-【病史摘要】
-{history_summary or "(无)"}
+【病史档案(空字段 = 尚未询问,不代表阴性 — 请在 evidence/differentiation 中酌情指出待补)】
+{history_block}
 
 【检查报告发现】
 {reports_block}

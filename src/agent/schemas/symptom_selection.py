@@ -19,13 +19,19 @@ from pydantic import BaseModel, Field
 class FollowupQuestion(BaseModel):
     """④ select_symptom 单条追问项。"""
 
-    type: Literal["slot", "open"] = Field(
+    type: Literal["slot", "open", "obstetric"] = Field(
         ...,
-        description="slot=补全 13 维 HPI 空槽;open=开放式问'还有别的不舒服吗'",
+        description=(
+            "slot=补全 13 维 HPI 空槽;open=开放式问'还有别的不舒服吗';"
+            "obstetric=首诊女性强制问妊娠/哺乳(⑪ safety_gate 妊娠禁忌兜底硬依赖)"
+        ),
     )
     slot: str | None = Field(
         None,
-        description="type=slot 时填,如 'trigger' / 'location' / 'nature' 等 13 维槽位名;type=open 时为 None",
+        description=(
+            "type=slot 时填,如 'trigger' / 'location' / 'nature' 等 13 维槽位名;"
+            "type=open / obstetric 时为 None"
+        ),
     )
 
 

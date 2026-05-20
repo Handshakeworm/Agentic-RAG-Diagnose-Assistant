@@ -25,11 +25,20 @@ schema 已用 Pydantic;嵌套结构(token_usage / latency / present_illness_slot
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, ConfigDict, Field
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 哨兵常量:slot 被问过但患者明确答"不知道/没注意/没有"
+# ────────────────────────────────────────────────────────────────────────────
+# 由 ⑦ process_followup_answer 的 LLM 在 slot_fills 中写入(单值=字符串,多值=单元素 list)。
+# 语义:已问过 ≠ 未询问;不进检索 query(BM25/dense 噪音),但在诊断 prompt 里保留(医学上
+# "患者明确说没诱因"是有效信号)。所有 sparse_queries / dense_query 构建处必须过滤掉它。
+SLOT_UNKNOWN_SENTINEL = "(患者未明确)"
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -118,6 +127,15 @@ class MedicalState(BaseModel):
     unaskable_symptoms: list[dict] = Field(default_factory=list)
     exam_round: int = 0
     pending_exam_results: list = Field(default_factory=list)
+
+    # === 入站追问状态机(intake_followup 节点专用) ===
+    # "slot" 阶段:循环按 13 维 HPI 空槽 + open 兜底追问;
+    # "done" 阶段:slot 已填满且 LLM 针对性追问已发出(或失败兜底),允许 router 放行到 ②。
+    intake_phase: Literal["slot", "done"] = "slot"
+
+    # === ⑦ 后路由分流:决定 ⑤/⑥/⑦ 走完是回 ⑤(intake targeted loop)还是 ②(④ 鉴别诊断回检索) ===
+    # intake 节点末尾写 "intake";④ select_symptom 写好 followup_questions 时写 "diagnostic"
+    followup_source: Literal["intake", "diagnostic"] | None = None
 
     # === 诊断结果 ===
     diagnosis_result: list[dict] = Field(default_factory=list)

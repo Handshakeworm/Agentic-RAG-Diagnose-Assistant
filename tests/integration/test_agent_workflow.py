@@ -36,7 +36,7 @@ def stub_dbs():
             return_value={"allergy_history": []},
         ),
         patch(
-            "src.agent.nodes.info_collect.load_initial_exam_reports",
+            "src.agent.nodes.analyze_initial_reports.load_initial_exam_reports",
             return_value=[],
         ),
         # EL 移除后不再 patch terms_collection / embedding / build_sparse_queries —

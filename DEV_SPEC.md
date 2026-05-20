@@ -2209,6 +2209,7 @@ result = graph.invoke(initial_state, config=config)
 - **输入**: `exam_reports`（文件引用列表，来自 Node ①）
 - **输出**: 新增 `report_findings`
 - **职责**:
+  0. **节点入口 `interrupt(...)` 询问患者是否上传新报告**（payload `{"type": "report_upload", "question": "..."}`,见 `analyze_initial_reports.INITIAL_REPORT_UPLOAD_PROMPT` 单点维护文案）;前端走 SSE `{event:"interrupt", status:"ongoing_report_upload"}` 渲染上传按钮 + "无,跳过" 快捷;resume 时 `interrupt(...)` 直接返回 client 传入的 `followup_answer` 字符串
   1. 对 `exam_reports` 中每份报告，通过 `load_report(file_ref)` **按需加载**（图片转 base64 / PDF 直传），送入**多模态 LLM** 提取结构化关键发现（加载结果仅作为函数局部变量，不写回 State）：
      - 异常检验值（`abnormal_values`）：保留原始数值，如"WBC 12.3×10⁹/L↑"、"Hb 85g/L↓"，供诊断推理时精确参考
      - 诊断印象（`impressions`）：如"右肺上叶磨玻璃结节"
@@ -2217,6 +2218,7 @@ result = graph.invoke(initial_state, config=config)
   2. 将结构化发现写入 `report_findings`
   > 报告内容本身已是标准医学术语,LLM 直读提取即可;`positive_findings` 中需同时包含异常值的临床概念解读,不能只记录原始数值
 - **共享逻辑**: 结构化提取逻辑封装在 `src/agent/utils/report_parser.py`，Node ⑨ `process_exam_result` 复用同一函数
+- **demo placeholder**: 前端文件上传当前是模拟通路(不真发后端字节);本节点 resume 后看到回答含 "已上传" 关键字时,**跳过真 VLM 调用**,给 `report_findings` 写一条 placeholder dict(name/summary 标注 demo)。真接 multipart 上传 + 持久化 + 真 VLM 是单独任务
 
 - **设计目的**:
   - 让报告中的客观证据在第一次 `build_query` 时就被纳入，提高初始召回精度
@@ -2581,39 +2583,49 @@ result = graph.invoke(initial_state, config=config)
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 graph TD;
-    __start__([__start__]):::first
-    N1("① info_collect<br/><i>主诉提取 + 病史/报告加载（单轮无交互）</i>")
-    N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
+    __start__(["⓪ __start__<br/><i>"]):::first
+    N0a("⓪a initial_ask<br/><i>• 0 LLM, 出 3 个问题等回答:还有别的不舒服吗 / 过敏慢病用药 / 孕期哺乳(女性才问)<br/>• 拉患者档案</i>")
+    N1("① info_collect<br/><i>一次 LLM 同时:<br/>• 把患者主诉拆成主要症状 + 详细描述 + 13 维细节, 合并写回 state</i>")
+    N1b("①.5 analyze_initial_reports<br/><i>interrupt 弹表问有无报告 → 加载/多模态解析 → report_findings</i>")
+    N1c("intake_followup_ask<br/><i>• 节点内分批问 13 维症状细节(每批 4 个 + 1 个'还有别的不适吗')<br/>• 全部收完一次 LLM 综合翻译,把回答归位到结构化字段,顺带 merge 病史/孕期/新症状<br/>• 标记追问来源 = intake → 出口固定 ⑤(症状细节之外的追问由 ⑤ 来判)</i>")
     N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N4("④ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
-    N5("⑤ generate_followup<br/><i>生成追问问题</i>")
-    N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
-    N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
+    N4("④ select_discriminative_symptom<br/><i>鉴别诊断追问(slot/open 补漏职责已移交 intake_followup_ask)</i>")
+    subgraph FollowupLoop[" "]
+        direction TB
+        N5("⑤ generate_followup<br/><i>双职责:<br/>• 已有现成问题(④ 写的鉴别诊断追问)→ LLM 拼口语化文案<br/>• 没现成问题但还在 intake 阶段 → LLM 看回答综合判要不要追问 slot 之外的细节</i>")
+        N6("⑥ wait_followup_answer<br/><i>暂停, 等用户回答上面这批追问</i>")
+        N7("⑦ process_followup_answer<br/><i>LLM 把用户回答翻译成结构化字段写回 state, 清掉本轮问题列表</i>")
+    end
     N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
     N9("⑨ process_exam_result<br/><i>处理检查结果回传</i>")
-    N10("⑩ diagnose<br/><i>诊断推理(Cross-Encoder 截断 + 父块扩展 + 1 步 LLM,原生多模态)</i>")
+    N10("⑩ diagnose<br/><i>诊断推理(可选 Cross-Encoder 截断 + 父块扩展 + 多模态 LLM 一步出结果)</i>")
     N11("⑪ safety_gate<br/><i>安全约束门控（规则+LLM）</i>")
     N12("⑫ generate_advice<br/><i>生成建议</i>")
     N13("⑬ format_response<br/><i>格式化最终回复</i>")
     __end__([__end__]):::last
 
-    __start__ -->|"入口"| N1;
-    N1 -->|"主诉提取+DB病史/报告加载"| N1b;
-    N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
-    N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
-    N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
-    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
-    N4 -.->|"followup_questions 为空 → 进入诊断"| N10;
-    N5 -->|"生成问题写入State"| N6;
-    N6 -->|"interrupt等待用户回答"| N7;
-    N7 -->|"更新症状,重新召回"| N2;
+    __start__ -->|"单边入口"| N0a;
+    N0a -->|"用户答完 → ① 一次 LLM 同时抽主诉 + 解析用户答案"| N1;
+    N1 -->|"主诉/HPI 已抽出 → 看患者要不要传报告"| N1b;
+    N1b -->|"报告环节走完 → 开始入站追问"| N1c;
+    N1c -->|"slot 已翻译进 state, 交给 ⑤ 看要不要 targeted 追问"| N5;
+    N2 -->|"组装检索 query"| N3;
+    N3 -->|"拿到候选医学知识 chunks"| N4;
+    %% 先声明主路径 → ⑩,后声明侧支 → ⑤,让 mermaid 把 ⑤⑥⑦ 排到右侧
+    N4 -.->|"信息够了 → 直接诊断"| N10;
+    N4 -.->|"还需追问鉴别诊断信息 → 继续"| N5;
+    N5 -.->|"有问题要问 → 让用户答"| N6;
+    N5 -.->|"LLM 判够了, 没新问题 → 直接进检索"| N2;
+    N6 -->|"用户答完 → 由 ⑦ 翻译"| N7;
+    N7 -.->|"还在 intake 阶段 → 回 ⑤ 让 LLM 再判要不要继续追问"| N5;
+    N7 -.->|"是鉴别诊断阶段答完, 或追问轮数已达上限 → 进检索"| N2;
+    N10 -.->|"需要患者去做检查再鉴别"| N8;
+    N10 -.->|"可下结论 → 走安全门控"| N11;
     N8 -->|"生成建议写入State"| N8b;
     N8b -->|"interrupt等待检查结果"| N9;
     N9 -->|"新证据回传,重新召回"| N2;
-    N10 -.->|"need_exam 且 exam_round < 3 → 需检查鉴别"| N8;
-    N10 -.->|"confirmed/insufficient/exam_round ≥ 3 → 进入安全门控"| N11;
     N11 -->|"过敏/用药/妊娠约束过滤"| N12;
     N12 -->|"用药/检查/高危提示"| N13;
     N13 -->|"输出最终回复"| __end__;
@@ -2621,6 +2633,7 @@ graph TD;
     classDef default fill:#ffffff,stroke:#333,stroke-width:1px,color:#000,line-height:1.2;
     classDef first fill:#f0f0f0,stroke:#999,color:#000;
     classDef last fill:#d4cffc,stroke:#333,color:#000;
+    style FollowupLoop fill:none,stroke:none
 ```
 
 ##### 4.1.3.1 条件路由函数 `should_continue`
@@ -2663,6 +2676,53 @@ def diagnose_router(state: MedicalState) -> str:
 
 > **常量来源**：`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` 统一定义在 `config/settings.py` 的 `agent_limits` 段（**权威位置见 §9.7**），路由器与节点必须通过 `settings.agent_limits.XXX` 引用。**禁止**在模块级重新 `MAX_X = 8` hardcode，以免阈值调优时需要多处同步修改。
 
+##### 4.1.3.3 条件路由函数 `intake_router`
+
+```python
+from config.settings import settings
+
+def generate_followup_out_router(state: MedicalState) -> str:
+    """⑤ generate_followup 出口路由(2 路返回)。
+
+    返回值:
+      "to_wait"         → ⑥ wait_followup_answer(有题让用户答)
+      "to_build_query"  → ② build_query(intake 阶段 LLM 判够了,没新题 → 进检索)
+    """
+    if state.followup_questions:
+        return "to_wait"
+    return "to_build_query"
+
+
+def post_followup_router(state: MedicalState) -> str:
+    """⑦ process_followup_answer 出口路由(2 路返回)。
+
+    返回值:
+      "loop_to_followup" → 回 ⑤(intake 阶段:⑤ LLM 再判要不要 targeted)
+      "to_build_query"   → ② build_query(④ 鉴别诊断答完 → 回检索;或 round 触顶)
+
+    判断顺序:
+      1. followup_round >= MAX_FOLLOWUP_ROUNDS:硬性兜底 → to_build_query
+      2. followup_source == "intake":intake 阶段, 回 ⑤
+      3. 其余(source == "diagnostic" 或 None):→ to_build_query
+    """
+    if state.followup_round >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS:
+        return "to_build_query"
+    if state.followup_source == "intake":
+        return "loop_to_followup"
+    return "to_build_query"
+```
+
+入站追问的"是否还在 intake 阶段"由 `state.followup_source: Literal["intake","diagnostic"] | None` 驱动:
+
+| source       | 谁负责设                       | 语义                                                |
+|--------------|--------------------------------|-----------------------------------------------------|
+| None         | 初始值                         | 还没进过追问环节                                    |
+| "intake"     | intake_followup_ask 末尾       | intake 阶段的追问,⑦ 后 ⑤ 可 LLM 再判 targeted        |
+| "diagnostic" | ④ select_discriminative_symptom | ④ 鉴别诊断追问,⑦ 后直接 → ② 回检索(④ 再判)         |
+
+⑦ 不写 followup_source,只翻译用户回答 + 清掉 followup_questions;
+两个 router 都是**纯函数**,只读 state。
+
 #### 4.1.4 LangGraph 构建伪代码
 
 ```python
@@ -2671,8 +2731,10 @@ from langgraph.graph import StateGraph, END
 workflow = StateGraph(MedicalState)
 
 # 添加节点
+workflow.add_node("initial_ask", initial_ask)
 workflow.add_node("info_collect", info_collect)
 workflow.add_node("analyze_initial_reports", analyze_initial_reports)
+workflow.add_node("intake_followup_ask", intake_followup_ask)
 workflow.add_node("build_query", build_query)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("select_discriminative_symptom", select_discriminative_symptom)
@@ -2687,12 +2749,15 @@ workflow.add_node("safety_gate", safety_gate)
 workflow.add_node("generate_advice", generate_advice)
 workflow.add_node("format_response", format_response)
 
-# 设置入口
-workflow.set_entry_point("info_collect")
+# 设置入口（START → ⓪a 单边；⓪a 入口 interrupt 弹综合 form,首轮第一个 form;
+# ① 推迟到 ⓪a 答完 + ⑦ 解析后,由 intake_router 的 to_info_collect 分支拉起）
+workflow.add_edge(START, "initial_ask")
 
 # 顺序边
-workflow.add_edge("info_collect", "analyze_initial_reports")
-workflow.add_edge("analyze_initial_reports", "build_query")
+workflow.add_edge("initial_ask", "info_collect")              # ⓪a → ①(① 一次 LLM 同时抽主诉 + 解析 form 答案)
+workflow.add_edge("info_collect", "analyze_initial_reports")  # ① → ①.5(interrupt 问报告)
+workflow.add_edge("analyze_initial_reports", "intake_followup_ask")
+workflow.add_edge("intake_followup_ask", "generate_followup")
 workflow.add_edge("build_query", "retrieve")
 workflow.add_edge("retrieve", "select_discriminative_symptom")
 
@@ -2706,10 +2771,30 @@ workflow.add_conditional_edges(
     }
 )
 
-# 追问循环（症状）—— generate_followup → wait_followup_answer(interrupt) → process_followup_answer
-workflow.add_edge("generate_followup", "wait_followup_answer")     # 生成问题 → 等待回答
-workflow.add_edge("wait_followup_answer", "process_followup_answer")  # interrupt 恢复后处理回答
-workflow.add_edge("process_followup_answer", "build_query")        # 回到循环顶部
+# ⑤ 出口 conditional:
+#   to_wait        = 有 followup_questions → 让 ⑥ interrupt 等用户答
+#   to_build_query = intake 阶段 LLM 判够了, 没新题 → 直接 ②
+workflow.add_conditional_edges(
+    "generate_followup",
+    generate_followup_out_router,
+    {
+        "to_wait": "wait_followup_answer",
+        "to_build_query": "build_query",
+    }
+)
+
+# ⑥ → ⑦ → post_followup_router 2 路:
+#   loop_to_followup = source=="intake" (intake 阶段, ⑤ LLM 再判 targeted)
+#   to_build_query   = source=="diagnostic" (④ 鉴别诊断追问完成回检索) 或 round 触顶
+workflow.add_edge("wait_followup_answer", "process_followup_answer")
+workflow.add_conditional_edges(
+    "process_followup_answer",
+    post_followup_router,
+    {
+        "loop_to_followup": "generate_followup",
+        "to_build_query": "build_query",
+    }
+)
 
 # 检查循环（检查结果回传）—— recommend_exam → wait_exam_report(interrupt) → process_exam_result
 workflow.add_edge("recommend_exam", "wait_exam_report")            # 生成建议 → 等待结果
@@ -4008,7 +4093,7 @@ flowchart TD
 | G1 | FastAPI 应用骨架 | [x] | 2026-05-12 | `src/api/app.py::create_app()` 工厂 + 模块级 `app` uvicorn 入口;`Instrumentator` 接入 `/metrics`(`excluded_handlers=["/healthz", "/readyz", "/metrics"]` 防自污染,§5.2.1 ②);`src/api/routes/__init__.py::register_routers(app)` 集中挂载点(G2-G6 / H8 注释占位,目前 noop);8 unit smoke PASS(/ 404、/metrics 200 + `http_requests_total`/`http_request_duration_seconds` family、/metrics 自身不被采集、/healthz /readyz NOT-IN-SCOPE 锁 404、register_routers idempotent);活 uvicorn 进程 curl 验通 |
 | G2 | JWT 认证中间件 | [x] | 2026-05-12 | `src/api/middleware/auth_middleware.py`:bcrypt 5.x `hash_password`/`verify_password` + PyJWT HS256 `encode_access_token`/`decode_access_token` + `get_current_user` Depends + `require_role(*roles)` 工厂(403 守卫,误用空参 ValueError);`src/api/schemas/auth_schema.py` Pydantic `RegisterRequest`(`Literal["patient","admin"]` 防 doctor 误传)/`LoginRequest`/`TokenResponse`/`UserOut`;`src/api/routes/auth.py` 3 端点(`POST /auth/register` 201 + IntegrityError → 409 + `POST /auth/login`(密码错与用户不存在共享 401 防枚举)+ `GET /auth/me` 不打 DB);14 unit(bcrypt salt 不等、verify 异常哈希 False、JWT roundtrip + 过期/伪造/缺 sub 全 401、require_role 三场景)+ 15 integration(端点闭环 + bcrypt 哈希入库验证 + 临时 admin-only 路由验角色守卫)= 29 PASS;活 uvicorn curl 验通 |
 | G3 | 限流中间件 | [x] | 2026-05-12 | `src/api/middleware/rate_limiter.py`:`RateLimitBackend` Protocol 抽象配额存储(H6 切 Redis 只换实现)+ `InMemorySlidingWindow`(线程安全,deque[timestamp] 每请求 popleft 过期戳)+ `RateLimitMiddleware`(BaseHTTPMiddleware,超限 429 + `Retry-After` header + JSON body 含 retry_after/limit/window);key 选择:有效 JWT → `user:<sub>`,无效/无 token → `ip:<addr>`(伪造 token 不直接拒,fallback 到 IP 防绕过);excluded_paths 含 `/metrics` + 防御式 `/healthz` `/readyz`(H8);配额走 `settings.api.RATE_LIMIT_PER_MINUTE`(默认 30/分钟);12 unit PASS(窗口满 429 + 时间滑过释放 + key 隔离 + retry_after 单调递减 + JWT 用户隔离 + 伪造 token 落 IP 桶 + /metrics 免限流);活 uvicorn `API_RATE_LIMIT_PER_MINUTE=5` 验通 |
-| G4 | 问诊接口 | [x] | 2026-05-13 | `src/api/routes/diagnosis.py` `POST /diagnose`(async + `Depends(get_current_user)`):首次建 sessions 行 + invoke graph;后续轮 `Command(resume=...)` 恢复 interrupt;通过 `aget_state(...).next` 区分终态 vs `wait_followup_answer` / `wait_exam_report` interrupt → status 状态机 `ongoing_followup` / `ongoing_exam` / `completed`;终态按 §9.6.2/§9.6.5 裸代码模板组装 rag_trace 15 字段 + conversations 1 行同事务写;失败兜底 `_build_error_info` 派生 step;`patient_repo.load_medical_history` 升级为真查询(8 张表 → spec §4.1.1 dict);8 integration PASS(graph mock,验首轮终态/失败兜底/两种 interrupt/越权 403/不存在 404)。⚠️ checkpointer 当前 `InMemorySaver` 模块级单例,生产应换 `PostgresSaver`(deps 已有)|
+| G4 | 问诊接口 | [x] | 2026-05-20 | `src/api/routes/diagnosis.py` `POST /diagnose` **走 SSE 流式**(`text/event-stream`):首次建 sessions 行 + 走 `graph.astream_events(version="v2")` 监听 `on_chain_start` → 每个节点**进入时**推一条 `{event:"progress", node, text}`(文案查 `_NODE_PROGRESS_TEXT` 15 行 mapping,改用 events 是因为旧 `stream_mode="updates"` 在节点**结束**才 yield,灰字延迟一拍);events 退出后用 `aget_state(...).next` 区分,**4 种 interrupt 状态各自路由**:`initial_ask` 节点内 interrupt 推 `{event:"interrupt", status:"ongoing_initial_ask", pending_questions:[open/history/obstetric]}`(首轮第 1 个 form,⓪a 写 followup_questions/_question)、`wait_followup_answer` 推 `ongoing_followup`(slot 追问 form)、`wait_exam_report` 推 `ongoing_exam`、`analyze_initial_reports` 节点内 interrupt 推 `ongoing_report_upload`(payload 文案在 `INITIAL_REPORT_UPLOAD_PROMPT` 单点维护);终态推 `{event:"completed", session_id, status, final_response, diagnosis_result, medication_advice, risk_warnings}`;generator 内异常推 `{event:"error", session_id, detail}`(SSE 头已发不能 raise);终态写 rag_trace/conversations 时机和 §9.6.2/§9.6.5 裸代码模板完全一致(generator 最后一个 yield 之前);后续轮 `Command(resume=...)` 恢复 interrupt 同源;失败兜底 `_build_error_info` 派生 step;`patient_repo.load_medical_history` 真查询 8 张表 → spec §4.1.1 dict;10 integration PASS(mock astream_events + aget_state,helper `_read_sse_events` 解 SSE,验 progress 推送 / 首轮 completed / 失败兜底 / 四种 interrupt(initial_ask/followup/exam/report_upload) / 越权 403 / 不存在 404)。**首轮 LLM 调用从 2 次(原 ⑦+①)合并为 1 次(①),节省 ~3s 等待**;⑦ 退化为"⑥ 后追问解析专属",intake_router 简化为 2 路。⚠️ checkpointer 当前 `InMemorySaver` 模块级单例,生产应换 `PostgresSaver`(deps 已有);`DiagnoseResponse` Pydantic 模型保留在 schemas 仅作字段定义参考,实际接口不再返 JSON|
 | G5 | 患者信息接口 | [x] | 2026-05-13 | `src/api/routes/patient.py` 11 端点(GET/PUT `/me` + 三张 ⚠️必问表 medical-history/allergies/medications POST/DELETE);全部 `require_role("patient")`,**没有 path 参数**(身份隔离从设计上根除越权);PUT `/me` 自动建 patients 行(注册时不建,延后到首次填档);`_delete_owned_or_404` 验 owner 防泄漏存在性;`_ensure_patient_row` 子表写入前兜底建 patients 行;8 integration PASS(admin 角色 403 / 部分更新语义 / 创建-查看-删除闭环 / 跨用户 404 / safety_gate 同链路读取一致)。⚠️ 5 张子表(surgical_trauma/transfusion/family_history/menstrual/exam_reports)只在 GET 全档案返回,独立 CRUD 留 TODO;exam_reports 文件上传需 multipart endpoint 单独做 |
 | G6 | 管理员接口 | [x] | 2026-05-13 | `src/api/routes/admin.py` 6 端点(GET `/users` 分页 + DELETE `/users/{id}`(防删自己)+ system_config GET 列表/单条/PUT/DELETE + `/kb/upload` stub);全部 `require_role("admin")`;PUT `/admin/config/{key}` 同事务写 system_config + config_change_log(spec §5.3.1 末);`change_reason` 字段 schema 强制 `min_length=1` 防止变更无说明;10 integration PASS(角色守卫 + 分页 + 防删自己 + change_log 同事务双行 + delete 也写日志 new_value=null + stub 返 202+unimplemented)。⚠️ 知识库上传走 stub:C7 ingestion pipeline 入口函数未做完,本端点提示走 scripts 路径;C7 完工后改 multipart 上传 + 后台 task + kb_change_log |
 | G7 | Nginx 反向代理 | [x] | 2026-05-13 | `infra/docker/nginx.conf`(docker-compose 已挂);worker 自动 + upstream keepalive 32 + `client_max_body_size 50M`(为知识库/exam_reports 上传)+ `proxy_read_timeout 600s`(LLM 慢路径)+ `set_real_ip_from + X-Forwarded-For + X-Real-IP`(让 G3 限流拿到真实客户端 IP,否则全是 nginx 容器 IP IP 桶失效)+ `X-Forwarded-Proto`(FastAPI redirect/OpenAPI scheme);`/nginx-health` 内嵌 200 给外部 LB 探活;HTTPS / TLS 留生产部署再接(本期 demo HTTP)。**真起验证**(2026-05-13):`docker-compose.demo.yml` override(J0 `Dockerfile.api` 完工前用,host 跑 uvicorn 8000 + nginx 容器 `extra_hosts: api:host-gateway` 把 nginx.conf 里 `server api:8000` 解到宿主机,主 compose 不动 J0 无缝继承)— curl `localhost:80/{nginx-health,/metrics,/auth/me,/auth/register,/auth/me with token}` 全链路 200 / 401 闭环验通,nginx 日志 rt=2ms,X-Real-IP 透传 OK |

@@ -662,34 +662,44 @@ result = graph.invoke(initial_state, config=config)
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 graph TD;
-    __start__([__start__]):::first
-    N1("① info_collect<br/><i>主诉提取 + 病史/报告加载（单轮无交互）</i>")
-    N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
+    __start__(["⓪ __start__<br/><i>fan-out 并行入口</i>"]):::first
+    N0a("⓪a initial_ask<br/><i>零 LLM 模板追问:open + history + obstetric(女性追加,妊娠/哺乳每次会话以最新回答为准)</i>")
+    N1("① info_collect<br/><i>主诉提取 + 病史加载（单轮无交互）</i>")
+    N1b("①.5 analyze_initial_reports<br/><i>上传报告 → 多模态 LLM 解析 → 提取结构化发现(report_findings)</i>")
+    N1c("intake_followup_ask<br/><i>入站追问:slot 空槽循环 + open 兜底,全填后 1 次 LLM 出针对性追问(只问不诊),phase=done 放行</i>")
     N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N4("④ select_discriminative_symptom<br/><i>智能追问选择(1 LLM,slot 维度填补 + open 兜底)</i>")
-    N5("⑤ generate_followup<br/><i>生成追问问题</i>")
-    N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
-    N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
+    N4("④ select_discriminative_symptom<br/><i>鉴别诊断追问(slot/open 补漏职责已移交 intake_followup_ask)</i>")
+    subgraph FollowupLoop[" "]
+        direction TB
+        N5("⑤ generate_followup<br/><i>生成追问问题</i>")
+        N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
+        N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
+    end
     N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
     N9("⑨ process_exam_result<br/><i>处理检查结果回传</i>")
-    N10("⑩ diagnose<br/><i>诊断推理(Cross-Encoder 截断 + 父块扩展 + 1 步 LLM,原生多模态)</i>")
+    N10("⑩ diagnose<br/><i>诊断推理(可选 Cross-Encoder 截断 + 父块扩展 + 多模态 LLM 一步出结果)</i>")
     N11("⑪ safety_gate<br/><i>安全约束门控（规则+LLM）</i>")
     N12("⑫ generate_advice<br/><i>生成建议</i>")
     N13("⑬ format_response<br/><i>格式化最终回复</i>")
     __end__([__end__]):::last
 
-    __start__ -->|"入口"| N1;
-    N1 -->|"主诉提取+DB病史/报告加载"| N1b;
-    N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
+    __start__ -->|"fan-out 入口"| N1;
+    __start__ -->|"fan-out 并行入口"| N0a;
+    N1 -->|"主诉提取+DB病史加载"| N1b;
+    N0a -->|"模板追问就绪 → fan-in ①.5"| N1b;
+    N1b -->|"入站追问起点"| N1c;
+    N1c -->|"slot/open/targeted → ⑤ 口语化"| N5;
     N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
     N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
-    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
+    %% 先声明主路径 → ⑩,后声明侧支 → ⑤,让 mermaid 把 ⑤⑥⑦ 排到右侧
     N4 -.->|"followup_questions 为空 → 进入诊断"| N10;
+    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
     N5 -->|"生成问题写入State"| N6;
     N6 -->|"interrupt等待用户回答"| N7;
-    N7 -->|"更新症状,重新召回"| N2;
+    N7 -.->|"intake_phase=slot → 回入站追问"| N1c;
+    N7 -.->|"intake_phase=done → 入检索"| N2;
     N8 -->|"生成建议写入State"| N8b;
     N8b -->|"interrupt等待检查结果"| N9;
     N9 -->|"新证据回传,重新召回"| N2;
@@ -702,6 +712,7 @@ graph TD;
     classDef default fill:#ffffff,stroke:#333,stroke-width:1px,color:#000,line-height:1.2;
     classDef first fill:#f0f0f0,stroke:#999,color:#000;
     classDef last fill:#d4cffc,stroke:#333,color:#000;
+    style FollowupLoop fill:none,stroke:none
 ```
 
 ##### 4.1.3.1 条件路由函数 `should_continue`
@@ -744,6 +755,39 @@ def diagnose_router(state: MedicalState) -> str:
 
 > **常量来源**：`MAX_FOLLOWUP_ROUNDS` / `MAX_EXAM_ROUNDS` / `MAX_FOLLOWUP_QUESTIONS` 统一定义在 `config/settings.py` 的 `agent_limits` 段（**权威位置见 §9.7**），路由器与节点必须通过 `settings.agent_limits.XXX` 引用。**禁止**在模块级重新 `MAX_X = 8` hardcode，以免阈值调优时需要多处同步修改。
 
+##### 4.1.3.3 条件路由函数 `intake_router`
+
+```python
+from config.settings import settings
+
+def intake_router(state: MedicalState) -> str:
+    """⑦ process_followup_answer 出口路由(入站追问 / 鉴别诊断追问共用)。
+
+    放行规则(任意命中即放行到 ② build_query):
+      1. followup_round >= MAX_FOLLOWUP_ROUNDS  — 硬性兜底,防无穷循环
+      2. state.intake_phase == "done"           — 入站阶段已结束(slot 全填 + LLM 针对性追问已发或失败兜底)
+
+    其余 (intake_phase=="slot") → "loop_intake" 回到 intake_followup_ask 继续。
+    ④-driven 鉴别诊断追问循环中,intake_phase 已是 "done",router 直接放行,
+    与 intake 入站循环共用同一出口路由,不再单独写 followup-loop 边。
+    """
+    if state.followup_round >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS:
+        return "exit_intake"
+    if state.intake_phase == "done":
+        return "exit_intake"
+    return "loop_intake"
+```
+
+入站追问状态机由 `state.intake_phase: Literal["slot", "done"]` 驱动:
+
+| phase  | 触发动作                                         | 谁负责切换                    |
+|--------|--------------------------------------------------|-------------------------------|
+| "slot" | 初始值;intake_followup_ask 每轮按空槽 + open 出题 | 默认                          |
+| "done" | slot 全填 → intake LLM 针对性阶段产出 / 失败兜底  | intake_followup_ask 内部 inline |
+
+⑦ 不写 intake_phase,只回填 slot_fills / new_symptoms / obstetric_fills / history_fills。
+intake_router 是**纯函数**,只读 state.intake_phase 与 followup_round。
+
 #### 4.1.4 LangGraph 构建伪代码
 
 ```python
@@ -752,8 +796,10 @@ from langgraph.graph import StateGraph, END
 workflow = StateGraph(MedicalState)
 
 # 添加节点
+workflow.add_node("initial_ask", initial_ask)
 workflow.add_node("info_collect", info_collect)
 workflow.add_node("analyze_initial_reports", analyze_initial_reports)
+workflow.add_node("intake_followup_ask", intake_followup_ask)
 workflow.add_node("build_query", build_query)
 workflow.add_node("retrieve", retrieve)
 workflow.add_node("select_discriminative_symptom", select_discriminative_symptom)
@@ -768,12 +814,15 @@ workflow.add_node("safety_gate", safety_gate)
 workflow.add_node("generate_advice", generate_advice)
 workflow.add_node("format_response", format_response)
 
-# 设置入口
-workflow.set_entry_point("info_collect")
+# 设置入口（START fan-out 并行到 ⓪a 与 ①；两条支路在 ①.5 fan-in 汇合）
+workflow.add_edge(START, "info_collect")
+workflow.add_edge(START, "initial_ask")
 
 # 顺序边
 workflow.add_edge("info_collect", "analyze_initial_reports")
-workflow.add_edge("analyze_initial_reports", "build_query")
+workflow.add_edge("initial_ask", "analyze_initial_reports")
+workflow.add_edge("analyze_initial_reports", "intake_followup_ask")
+workflow.add_edge("intake_followup_ask", "generate_followup")
 workflow.add_edge("build_query", "retrieve")
 workflow.add_edge("retrieve", "select_discriminative_symptom")
 
@@ -787,10 +836,19 @@ workflow.add_conditional_edges(
     }
 )
 
-# 追问循环（症状）—— generate_followup → wait_followup_answer(interrupt) → process_followup_answer
+# 追问循环（入站 / 鉴别共用 ⑤⑥⑦） —— generate_followup → wait_followup_answer(interrupt) → process_followup_answer
 workflow.add_edge("generate_followup", "wait_followup_answer")     # 生成问题 → 等待回答
 workflow.add_edge("wait_followup_answer", "process_followup_answer")  # interrupt 恢复后处理回答
-workflow.add_edge("process_followup_answer", "build_query")        # 回到循环顶部
+# 出口走 intake_router:loop_intake=回入站追问;exit_intake=放行到 ②
+# ④-driven 鉴别循环此时 intake_phase 已是 "done",router 直接放行到 ②
+workflow.add_conditional_edges(
+    "process_followup_answer",
+    intake_router,
+    {
+        "loop_intake": "intake_followup_ask",
+        "exit_intake": "build_query",
+    }
+)
 
 # 检查循环（检查结果回传）—— recommend_exam → wait_exam_report(interrupt) → process_exam_result
 workflow.add_edge("recommend_exam", "wait_exam_report")            # 生成建议 → 等待结果

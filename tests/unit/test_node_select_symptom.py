@@ -157,3 +157,116 @@ def test_questions_capped_at_max(mock_llm):
     s = _state_with_chief()
     update = select_discriminative_symptom(s)
     assert len(update["followup_questions"]) <= K
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 首诊女性 + obstetric 空 → 强制 prepend obstetric question
+# (⑪ safety_gate 妊娠/哺乳禁忌兜底硬依赖,见 select_symptom._needs_obstetric_force_ask)
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _female_state_no_obstetric():
+    """首诊女性 + 档案无 obstetric_history,触发强制问。"""
+    s = _state_with_chief()
+    s.medical_history = {
+        "basic_info": {"gender": "female", "birth_date": None, "name": None},
+        "obstetric_history": None,
+    }
+    return s
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_female_first_visit_force_prepend_obstetric(mock_llm):
+    """首诊女性 + 档案无 obstetric → followup_questions 第 1 条是 obstetric type。"""
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot="trigger")],
+    )
+
+    s = _female_state_no_obstetric()
+    update = select_discriminative_symptom(s)
+
+    assert update["followup_questions"][0] == {"type": "obstetric"}
+    assert update["followup_questions"][1] == {"type": "slot", "slot": "trigger"}
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_male_does_not_force_obstetric(mock_llm):
+    """男性 → 不强制问妊娠。"""
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot="trigger")],
+    )
+
+    s = _state_with_chief()
+    s.medical_history = {
+        "basic_info": {"gender": "male"},
+        "obstetric_history": None,
+    }
+    update = select_discriminative_symptom(s)
+
+    types = [q["type"] for q in update["followup_questions"]]
+    assert "obstetric" not in types
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_female_with_obstetric_filled_does_not_force(mock_llm):
+    """女性 + 档案已有 obstetric_history → 不再强制问(已知不重复问)。"""
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot="trigger")],
+    )
+
+    s = _state_with_chief()
+    s.medical_history = {
+        "basic_info": {"gender": "female"},
+        "obstetric_history": {"is_pregnant": False, "is_lactating": False},
+    }
+    update = select_discriminative_symptom(s)
+
+    types = [q["type"] for q in update["followup_questions"]]
+    assert "obstetric" not in types
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_non_first_round_does_not_force_obstetric(mock_llm):
+    """followup_round > 0 → 不再强制问(避免循环追问)。"""
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot="trigger")],
+    )
+
+    s = _female_state_no_obstetric()
+    s.followup_round = 1  # 已过首轮
+    update = select_discriminative_symptom(s)
+
+    types = [q["type"] for q in update["followup_questions"]]
+    assert "obstetric" not in types
+
+
+@patch("src.agent.nodes.select_symptom.get_llm")
+def test_obstetric_force_respects_quota(mock_llm):
+    """强制 prepend obstetric 后,总长度仍 ≤ MAX_FOLLOWUP_QUESTIONS;末尾 LLM 项被截。"""
+    from config.settings import settings
+    from src.agent.nodes.select_symptom import select_discriminative_symptom
+
+    K = settings.agent_limits.MAX_FOLLOWUP_QUESTIONS
+    mock_chain = mock_llm.return_value.with_structured_output.return_value.with_retry.return_value
+    mock_chain.invoke.return_value = SmartFollowupOutput(
+        questions=[FollowupQuestion(type="slot", slot=f"slot_{i}") for i in range(K)]
+    )
+
+    s = _female_state_no_obstetric()
+    update = select_discriminative_symptom(s)
+
+    assert len(update["followup_questions"]) <= K
+    # obstetric 必占第 1 位
+    assert update["followup_questions"][0] == {"type": "obstetric"}

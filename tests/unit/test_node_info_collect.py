@@ -1,10 +1,10 @@
 """tests/unit/test_node_info_collect.py — F2 ① info_collect 单元测试(DEV_SPEC §4.1.2 ①)。
 
-Mock LLM(返回结构化 schema 实例)+ Mock DB 加载函数;验证:
+Mock LLM(返回结构化 schema 实例);验证:
 - 完整输入 → 13 维 slots 全填(无空槽)
 - 简短输入 → 多空槽保持 None / []
-- DB 加载函数被以 patient_id 调用
 - LLM 失败 → 中安全等级,抛异常,_failures 计数 +1
+- **不写 medical_history**(由 ⓪a load + ⑦ 增量合并,① 写就覆盖增量了)
 """
 from __future__ import annotations
 
@@ -23,11 +23,9 @@ def _make_state(patient_input: str) -> MedicalState:
     return create_initial_state(patient_id="P-TEST", patient_input=patient_input)
 
 
-@patch("src.agent.nodes.info_collect.load_initial_exam_reports", return_value=[])
-@patch("src.agent.nodes.info_collect.load_medical_history", return_value={})
 @patch("src.agent.nodes.info_collect.get_llm")
-def test_full_input_fills_all_slots(mock_llm_factory, mock_history, mock_reports):
-    """完整输入应让 13 维 slots 全部有值。"""
+def test_full_input_fills_all_slots(mock_llm_factory):
+    """完整输入应让 13 维 slots 全部有值;update 不含 medical_history(防覆盖)。"""
     from src.agent.nodes.info_collect import info_collect
 
     schema_slots = SchemaSlots(
@@ -65,14 +63,14 @@ def test_full_input_fills_all_slots(mock_llm_factory, mock_history, mock_reports
     assert slots.associated_symptoms == ["反酸"]
     assert slots.treatment_response == "部分缓解"
 
-    mock_history.assert_called_once_with("P-TEST")
-    mock_reports.assert_called_once_with("P-TEST")
+    # ① 合并了 ⑦ 在 to_info_collect 路径上的活:LLM 没返 history/obstetric/new_symptoms
+    # 时,medical_history merge 后等于 state 原值(此处空 dict),confirmed_symptoms 不新增
+    assert update["medical_history"] == {}
+    assert update["confirmed_symptoms"] == []
 
 
-@patch("src.agent.nodes.info_collect.load_initial_exam_reports", return_value=[])
-@patch("src.agent.nodes.info_collect.load_medical_history", return_value={})
 @patch("src.agent.nodes.info_collect.get_llm")
-def test_short_input_leaves_slots_empty(mock_llm_factory, _h, _r):
+def test_short_input_leaves_slots_empty(mock_llm_factory):
     """简短输入对应多空槽,LLM 应保持未提及维度为 None / []。"""
     from src.agent.nodes.info_collect import info_collect
 
@@ -94,10 +92,8 @@ def test_short_input_leaves_slots_empty(mock_llm_factory, _h, _r):
     assert slots.associated_symptoms == []
 
 
-@patch("src.agent.nodes.info_collect.load_initial_exam_reports", return_value=[])
-@patch("src.agent.nodes.info_collect.load_medical_history", return_value={})
 @patch("src.agent.nodes.info_collect.get_llm")
-def test_llm_failure_raises_and_increments_failure_metric(mock_llm_factory, _h, _r):
+def test_llm_failure_raises_and_increments_failure_metric(mock_llm_factory):
     """中安全等级:重试耗尽后抛异常,_failures 计数 +1(spec §9.1 模板)。"""
     from src.agent.nodes.info_collect import info_collect
     from src.common.metrics import _failures
