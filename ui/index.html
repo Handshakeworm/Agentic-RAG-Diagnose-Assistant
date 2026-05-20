@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Agentic-RAG 医疗问诊助手 · Demo</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+  <style>
+    html, body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .chat-scroll::-webkit-scrollbar { width: 6px; }
+    .chat-scroll::-webkit-scrollbar-thumb { background: rgb(203 213 225); border-radius: 3px; }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .dot-typing { display: inline-flex; gap: 4px; }
+    .dot-typing span {
+      width: 6px; height: 6px; background: rgb(148 163 184);
+      border-radius: 50%; animation: dot 1.2s infinite ease-in-out;
+    }
+    .dot-typing span:nth-child(2) { animation-delay: 0.2s; }
+    .dot-typing span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes dot {
+      0%, 60%, 100% { transform: scale(0.7); opacity: 0.5; }
+      30%           { transform: scale(1); opacity: 1; }
+    }
+  </style>
+</head>
+
+<body class="bg-slate-50 text-slate-900 min-h-screen" x-data="app()" x-init="init()" x-cloak>
+
+<!-- ────────────── 顶栏 ────────────── -->
+<header class="bg-white border-b border-slate-200" x-show="token">
+  <div class="max-w-3xl mx-auto px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <div class="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center text-white font-bold text-sm">医</div>
+      <div>
+        <div class="text-sm font-semibold">问诊助手</div>
+        <div class="text-xs text-slate-400">Agentic-RAG Demo</div>
+      </div>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+      <span class="text-slate-500" x-text="email"></span>
+      <button @click="logout()" class="text-slate-400 hover:text-slate-700 transition">退出</button>
+    </div>
+  </div>
+</header>
+
+<!-- ────────────── 登录视图 ────────────── -->
+<main x-show="!token" class="min-h-screen flex items-center justify-center px-4">
+  <div class="w-full max-w-md">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-14 h-14 bg-indigo-600 rounded-2xl text-white font-bold text-xl mb-3 shadow-sm">医</div>
+      <h1 class="text-2xl font-semibold tracking-tight">问诊助手</h1>
+      <p class="text-sm text-slate-500 mt-1">Agentic-RAG Medical Care Assistant · Portfolio Demo</p>
+    </div>
+
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-100 p-6">
+      <!-- Tab 切换 -->
+      <div class="flex gap-1 bg-slate-100 rounded-xl p-1 mb-5">
+        <button @click="loginTab = 'demo'"
+                :class="loginTab === 'demo' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'"
+                class="flex-1 text-sm font-medium py-2 rounded-lg transition">
+          演示账号
+        </button>
+        <button @click="loginTab = 'manual'"
+                :class="loginTab === 'manual' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500'"
+                class="flex-1 text-sm font-medium py-2 rounded-lg transition">
+          账号登录
+        </button>
+      </div>
+
+      <!-- Demo 账号 tab -->
+      <div x-show="loginTab === 'demo'" class="space-y-2.5">
+        <template x-for="d in demos" :key="d.email">
+          <button @click="loginDemo(d.email)"
+                  :disabled="loading"
+                  class="w-full text-left p-4 border border-slate-200 rounded-xl hover:border-indigo-400 hover:bg-indigo-50/50 transition disabled:opacity-50">
+            <div class="flex items-start justify-between">
+              <div>
+                <div class="font-medium text-sm" x-text="d.name"></div>
+                <div class="text-xs text-slate-500 mt-0.5" x-text="d.tag"></div>
+              </div>
+              <span class="text-xs text-slate-400" x-text="d.email"></span>
+            </div>
+            <div class="text-xs text-slate-400 mt-2" x-text="d.scenario"></div>
+          </button>
+        </template>
+      </div>
+
+      <!-- 手动登录 / 注册 tab -->
+      <div x-show="loginTab === 'manual'" class="space-y-4">
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">邮箱</label>
+          <input type="email" x-model="email_input" placeholder="you@example.com"
+                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-slate-600 mb-1.5">密码</label>
+          <input type="password" x-model="password_input" placeholder="••••••••"
+                 @keydown.enter="manualLogin()"
+                 class="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 text-sm focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 transition" />
+        </div>
+        <div class="flex gap-2 pt-1">
+          <button @click="manualLogin()" :disabled="loading"
+                  class="flex-1 bg-indigo-600 text-white text-sm font-medium py-2.5 rounded-xl hover:bg-indigo-700 transition disabled:opacity-50">
+            <span x-show="!loading">登录</span>
+            <span x-show="loading">登录中…</span>
+          </button>
+          <button @click="manualRegister()" :disabled="loading"
+                  class="flex-1 bg-white border border-slate-200 text-slate-700 text-sm font-medium py-2.5 rounded-xl hover:bg-slate-50 transition disabled:opacity-50">
+            注册
+          </button>
+        </div>
+      </div>
+
+      <p x-show="errorMsg" x-text="errorMsg" class="text-xs text-red-600 mt-3 text-center fade-in"></p>
+    </div>
+
+    <p class="text-xs text-slate-400 text-center mt-6">
+      仅用于功能演示;**所有 AI 输出不构成医疗建议**,真实就医请咨询执业医师。
+    </p>
+  </div>
+</main>
+
+<!-- ────────────── 聊天视图 ────────────── -->
+<main x-show="token" class="max-w-3xl mx-auto px-4 py-6">
+
+  <!-- 消息流 -->
+  <div class="space-y-4 mb-32" x-ref="msgList">
+    <!-- 起始空态提示 -->
+    <div x-show="messages.length === 0" class="text-center py-12 fade-in">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-white rounded-2xl shadow-sm mb-4 border border-slate-100">
+        <svg class="w-8 h-8 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2-2h-5l-5 5v-5z" />
+        </svg>
+      </div>
+      <h2 class="text-lg font-semibold">请描述您的症状</h2>
+      <p class="text-sm text-slate-500 mt-1">例如:"昨天开始上腹部疼痛,饭后加重,伴反酸"</p>
+    </div>
+
+    <!-- 消息列表 -->
+    <template x-for="(msg, i) in messages" :key="i">
+      <div :class="msg.role === 'user' ? 'flex justify-end' : 'flex justify-start'" class="fade-in">
+        <div :class="msg.role === 'user'
+                       ? 'bg-indigo-600 text-white rounded-2xl rounded-tr-md'
+                       : 'bg-white text-slate-800 rounded-2xl rounded-tl-md border border-slate-100 shadow-sm'"
+             class="max-w-[85%] px-4 py-3 text-sm leading-relaxed whitespace-pre-wrap" x-html="msg.html || msg.text">
+        </div>
+      </div>
+    </template>
+
+    <!-- ──── 结构化追问 form 气泡(每条 pending_question 一行控件,在对话区内) ──── -->
+    <div x-show="pendingForm" class="flex justify-start fade-in">
+      <div class="max-w-[85%] w-full bg-white text-slate-800 rounded-2xl rounded-tl-md border border-slate-100 shadow-sm px-4 py-3 text-sm">
+        <p class="text-xs text-slate-400 mb-3">请逐项回答 ↓</p>
+        <template x-for="(q, qi) in (pendingForm?.questions || [])" :key="qi">
+          <div class="py-3 border-t border-slate-100 first:border-0 first:pt-0 space-y-2">
+            <p class="text-slate-700 leading-relaxed" x-text="q.question || '(无问题文本)'"></p>
+
+            <!-- type=obstetric: 两组 yes/no 按钮 -->
+            <template x-if="q.type === 'obstetric'">
+              <div class="space-y-1.5 pt-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs text-slate-500 w-10 shrink-0">怀孕</span>
+                  <template x-for="opt in [{v:'yes',label:'是'},{v:'no',label:'否'},{v:'unknown',label:'不清楚'}]" :key="opt.v">
+                    <button @click="setObstetricChoice(qi, 'preg', opt.v)"
+                            :class="(formAnswers[qi] && formAnswers[qi].preg === opt.v)
+                                      ? 'bg-indigo-600 text-white border-indigo-600'
+                                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'"
+                            class="border rounded-full px-3 py-1 text-xs transition" x-text="opt.label"></button>
+                  </template>
+                </div>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-xs text-slate-500 w-10 shrink-0">哺乳</span>
+                  <template x-for="opt in [{v:'yes',label:'是'},{v:'no',label:'否'},{v:'unknown',label:'不清楚'}]" :key="opt.v">
+                    <button @click="setObstetricChoice(qi, 'lact', opt.v)"
+                            :class="(formAnswers[qi] && formAnswers[qi].lact === opt.v)
+                                      ? 'bg-indigo-600 text-white border-indigo-600'
+                                      : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'"
+                            class="border rounded-full px-3 py-1 text-xs transition" x-text="opt.label"></button>
+                  </template>
+                </div>
+              </div>
+            </template>
+
+            <!-- type=report_upload: 文件选择按钮 + 已选文件列表 + "无,跳过" 快捷
+                 (模拟通路,不真发后端;后端 ①.5 看到 "已上传" 关键字给 state 加 placeholder) -->
+            <template x-if="q.type === 'report_upload'">
+              <div class="space-y-2">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button @click="$refs['fileInputForm' + qi].click()"
+                          class="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs hover:bg-indigo-100 transition">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    选择文件
+                  </button>
+                  <input type="file" :x-ref="'fileInputForm' + qi" class="hidden"
+                         accept="image/*,application/pdf" multiple
+                         @change="onReportFilesPicked(qi, $event)">
+                  <button @click="formAnswers[qi] = { skip: true, files: [] }"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">无,跳过</button>
+                </div>
+                <!-- 已选文件列表 -->
+                <template x-if="formAnswers[qi]?.files?.length">
+                  <div class="flex flex-wrap gap-1.5">
+                    <template x-for="(f, fi) in formAnswers[qi].files" :key="fi">
+                      <span class="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-full pl-2.5 pr-1 py-0.5 text-xs text-slate-600">
+                        <span x-text="f.name" class="max-w-[10rem] truncate"></span>
+                        <button @click="removeReportFile(qi, fi)" class="w-4 h-4 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center">×</button>
+                      </span>
+                    </template>
+                  </div>
+                </template>
+                <template x-if="formAnswers[qi]?.skip">
+                  <p class="text-xs text-slate-400">已选择跳过</p>
+                </template>
+                <p class="text-xs text-slate-400">(本 demo 不真把文件发后端解析,只演示交互链路)</p>
+              </div>
+            </template>
+
+            <!-- 其他 type: 单行/多行文本框 + 快捷"无 / 不清楚"按钮 -->
+            <template x-if="q.type !== 'obstetric' && q.type !== 'report_upload'">
+              <div class="space-y-1.5">
+                <textarea :value="formAnswers[qi] || ''"
+                          @input="formAnswers[qi] = $event.target.value"
+                          rows="1"
+                          placeholder="请输入..."
+                          class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-none"></textarea>
+                <div class="flex gap-1.5">
+                  <button @click="formAnswers[qi] = '无'"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">无</button>
+                  <button @click="formAnswers[qi] = '不清楚'"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">不清楚</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <div class="pt-3 mt-1 border-t border-slate-100 flex justify-end">
+          <button @click="submitForm()" :disabled="thinking"
+                  class="bg-indigo-600 text-white text-sm font-medium px-4 py-2 rounded-xl hover:bg-indigo-700 transition disabled:opacity-30">
+            提交回答
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 正在思考(SSE 推 progress 时下方灰字显示当前阶段) -->
+    <div x-show="thinking" class="flex justify-start fade-in">
+      <div class="bg-white border border-slate-100 rounded-2xl rounded-tl-md shadow-sm px-4 py-3">
+        <div class="flex items-center gap-3">
+          <div class="dot-typing"><span></span><span></span><span></span></div>
+          <span x-show="currentProgress" x-text="currentProgress"
+                class="text-xs text-slate-400 transition-opacity"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 诊断结果卡片(completed 状态) -->
+    <div x-show="diagnosis" class="space-y-4 fade-in">
+      <!-- 诊断疾病列表 -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <div class="w-2 h-2 bg-indigo-600 rounded-full"></div>
+          <h3 class="text-sm font-semibold">诊断分析</h3>
+        </div>
+        <div class="divide-y divide-slate-100">
+          <template x-for="d in (diagnosis || [])" :key="d.disease">
+            <div class="px-5 py-4">
+              <div class="flex items-baseline justify-between mb-2">
+                <span class="font-medium text-sm" x-text="d.disease"></span>
+                <span class="text-xs text-slate-500" x-text="(d.probability * 100).toFixed(0) + '%'"></span>
+              </div>
+              <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-3">
+                <div class="h-full bg-indigo-500 transition-all"
+                     :style="'width: ' + (d.probability * 100) + '%'"></div>
+              </div>
+              <template x-if="d.evidence && d.evidence.length">
+                <ul class="text-xs text-slate-600 space-y-1 mt-2">
+                  <template x-for="e in d.evidence" :key="e">
+                    <li class="flex gap-1.5"><span class="text-indigo-400">·</span><span x-text="e"></span></li>
+                  </template>
+                </ul>
+              </template>
+              <p x-show="d.differentiation" class="text-xs text-slate-500 mt-2 italic" x-text="'鉴别:' + d.differentiation"></p>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- 用药建议 -->
+      <div x-show="medication && medication.length"
+           class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <div class="w-2 h-2 bg-emerald-500 rounded-full"></div>
+          <h3 class="text-sm font-semibold">用药建议</h3>
+        </div>
+        <div class="px-5 py-4 space-y-2">
+          <template x-for="m in (medication || [])" :key="JSON.stringify(m)">
+            <div class="text-sm">
+              <div class="font-medium" x-text="m.drug || m.name || JSON.stringify(m)"></div>
+              <div x-show="m.dosage" class="text-xs text-slate-500" x-text="m.dosage"></div>
+              <div x-show="m.reason" class="text-xs text-slate-500 mt-0.5" x-text="m.reason"></div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- 风险提示 -->
+      <div x-show="risks && risks.length"
+           class="bg-amber-50 border border-amber-200 rounded-2xl overflow-hidden">
+        <div class="px-5 py-4 border-b border-amber-200 flex items-center gap-2">
+          <svg class="w-4 h-4 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+          <h3 class="text-sm font-semibold text-amber-900">风险提示</h3>
+        </div>
+        <ul class="px-5 py-4 space-y-1.5 text-sm text-amber-900">
+          <template x-for="r in (risks || [])" :key="r">
+            <li class="flex gap-1.5"><span>·</span><span x-text="r"></span></li>
+          </template>
+        </ul>
+      </div>
+
+      <!-- 推荐检查(ongoing_exam 终态) -->
+      <div x-show="recommendedTests && recommendedTests.length"
+           class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+        <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
+          <div class="w-2 h-2 bg-sky-500 rounded-full"></div>
+          <h3 class="text-sm font-semibold">建议进一步检查</h3>
+        </div>
+        <ul class="px-5 py-4 space-y-1.5 text-sm">
+          <template x-for="t in (recommendedTests || [])" :key="t">
+            <li class="flex gap-1.5"><span class="text-sky-400">·</span><span x-text="t"></span></li>
+          </template>
+        </ul>
+        <p class="px-5 pb-4 text-xs text-slate-400">
+          完成检查后,可以开始新问诊上传报告。
+        </p>
+      </div>
+
+      <button @click="resetSession()"
+              class="w-full bg-white border border-slate-200 text-slate-700 text-sm font-medium py-3 rounded-2xl hover:bg-slate-50 transition">
+        开始新问诊
+      </button>
+    </div>
+  </div>
+
+  <!-- ────── 底部输入区 ────── -->
+  <div x-show="!diagnosis && !recommendedTests" class="fixed bottom-0 inset-x-0 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent pt-6 pb-4 px-4">
+    <div class="max-w-3xl mx-auto space-y-2">
+      <!-- 已"上传"文件预览(模拟) -->
+      <div x-show="uploadedFiles.length" class="flex flex-wrap gap-2">
+        <template x-for="(f, i) in uploadedFiles" :key="i">
+          <span class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full pl-3 pr-1.5 py-1 text-xs text-slate-600">
+            <svg class="w-3.5 h-3.5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <span x-text="f.name" class="max-w-[12rem] truncate"></span>
+            <button @click="uploadedFiles.splice(i, 1)" class="w-4 h-4 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center" aria-label="移除">×</button>
+          </span>
+        </template>
+      </div>
+
+      <!-- 底栏文本框:只在没有 pending form 时显示(首次问诊或终态);追问轮全部走气泡内的 form -->
+      <div x-show="!pendingForm" class="bg-white border border-slate-200 rounded-2xl shadow-sm flex items-end gap-2 p-2">
+        <!-- 上传按钮(模拟,不持久化、不发后端) -->
+        <button @click="$refs.fileInput.click()" :disabled="thinking"
+                class="text-slate-400 hover:text-indigo-600 w-9 h-9 rounded-xl flex items-center justify-center transition disabled:opacity-30"
+                title="上传检查报告(模拟,本 demo 不发后端)">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+          </svg>
+        </button>
+        <input type="file" x-ref="fileInput" class="hidden"
+               accept="image/*,application/pdf"
+               multiple
+               @change="onFilesPicked($event)">
+        <textarea x-model="inputText"
+                  @keydown.enter.prevent="if(!$event.shiftKey) send()"
+                  :placeholder="sessionId ? '请回答上面的问题…' : '请描述您的症状(回车发送,Shift+回车换行)'"
+                  rows="1"
+                  :disabled="thinking"
+                  class="flex-1 resize-none text-sm bg-transparent px-3 py-2 max-h-32 focus:outline-none disabled:opacity-50"
+                  x-ref="input"
+                  @input="autoGrow($event.target)"></textarea>
+        <button @click="send()" :disabled="thinking || !canSend()"
+                class="bg-indigo-600 text-white w-9 h-9 rounded-xl flex items-center justify-center hover:bg-indigo-700 transition disabled:opacity-30 disabled:hover:bg-indigo-600">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+          </svg>
+        </button>
+      </div>
+      <p x-show="apiError" x-text="apiError" class="text-xs text-red-600 text-center mt-2 fade-in"></p>
+      <p x-show="uploadToast" x-text="uploadToast"
+         class="text-xs text-emerald-600 text-center mt-1 fade-in"></p>
+    </div>
+  </div>
+
+</main>
+
+<!-- ────────────── App 状态 + 行为 ────────────── -->
+<script>
+function app() {
+  return {
+    // ─── 登录 ───
+    token: localStorage.getItem('token') || '',
+    email: localStorage.getItem('email') || '',
+    loginTab: 'demo',
+    email_input: '',
+    password_input: '',
+    loading: false,
+    errorMsg: '',
+    demos: [
+      { email: 'patient1@demo.com', name: '张女士 · 32 岁 · 女',
+        tag: '孕 16 周',
+        scenario: '演示妊娠期用药安全兜底(safety_gate ⑪)' },
+      { email: 'patient2@demo.com', name: '李先生 · 65 岁 · 男',
+        tag: '高血压 + 糖尿病 + 青霉素过敏',
+        scenario: '演示既往慢病参与诊断推理 + 过敏药拦截' },
+      { email: 'patient3@demo.com', name: '王同学 · 25 岁 · 男',
+        tag: '无既往史',
+        scenario: '首诊新患者基线(看 ④ 自动追问)' },
+    ],
+
+    // ─── 聊天 ───
+    sessionId: null,
+    messages: [],         // [{role: 'user'|'assistant', text|html}]
+    inputText: '',
+    thinking: false,
+    currentProgress: '',  // SSE progress event 推送的当前阶段灰字(thinking=false 时清空)
+    apiError: '',
+
+    // ─── 诊断结果 ───
+    diagnosis: null,
+    medication: null,
+    risks: null,
+    recommendedTests: null,
+
+    // ─── 上传报告(模拟,不发后端) ───
+    uploadedFiles: [],     // [{name, size}]
+    uploadToast: '',
+    _uploadToastTimer: null,
+
+    // ─── 结构化追问 form(气泡内一问一控件) ───
+    pendingForm: null,      // null 或 { questions: [{type, slot?, question, target?}, ...] }
+    formAnswers: {},        // { [qIndex]: 'text' | {preg: 'yes'|'no'|'unknown', lact: ...} }
+
+    init() {
+      // 已登录刷新页面 → 直接进聊天
+      if (this.token) this.$nextTick(() => this.$refs.input?.focus());
+    },
+
+    // ───────── 登录相关 ─────────
+    async loginDemo(email) {
+      this.email_input = email;
+      this.password_input = 'demo1234';
+      await this.manualLogin();
+    },
+
+    async manualLogin() {
+      this.errorMsg = '';
+      if (!this.email_input || !this.password_input) {
+        this.errorMsg = '请输入邮箱和密码'; return;
+      }
+      this.loading = true;
+      try {
+        const res = await fetch('/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: this.email_input, password: this.password_input }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `登录失败 (${res.status})`);
+        }
+        const data = await res.json();
+        this.token = data.access_token;
+        this.email = this.email_input;
+        localStorage.setItem('token', this.token);
+        localStorage.setItem('email', this.email);
+        this.email_input = ''; this.password_input = '';
+        this.$nextTick(() => this.$refs.input?.focus());
+      } catch (e) {
+        this.errorMsg = e.message || '登录失败';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    async manualRegister() {
+      this.errorMsg = '';
+      if (!this.email_input || !this.password_input) {
+        this.errorMsg = '请输入邮箱和密码'; return;
+      }
+      if (this.password_input.length < 6) {
+        this.errorMsg = '密码至少 6 位'; return;
+      }
+      this.loading = true;
+      try {
+        const res = await fetch('/auth/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: this.email_input, password: this.password_input, role: 'patient' }),
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.detail || `注册失败 (${res.status})`);
+        }
+        const data = await res.json();
+        this.token = data.access_token;
+        this.email = this.email_input;
+        localStorage.setItem('token', this.token);
+        localStorage.setItem('email', this.email);
+        this.email_input = ''; this.password_input = '';
+        this.$nextTick(() => this.$refs.input?.focus());
+      } catch (e) {
+        this.errorMsg = e.message || '注册失败';
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    logout() {
+      this.token = ''; this.email = '';
+      localStorage.removeItem('token'); localStorage.removeItem('email');
+      this.resetSession();
+    },
+
+    // ───────── 聊天 / 诊断 ─────────
+    resetSession() {
+      this.sessionId = null;
+      this.messages = [];
+      this.diagnosis = null;
+      this.medication = null;
+      this.risks = null;
+      this.recommendedTests = null;
+      this.apiError = '';
+      this.inputText = '';
+      this.uploadedFiles = [];
+      this.uploadToast = '';
+      this.pendingForm = null;
+      this.formAnswers = {};
+      this.$nextTick(() => this.$refs.input?.focus());
+    },
+
+    canSend() {
+      // 底栏 send 只用于无 pendingForm 时(首次问诊或 ④ 鉴别诊断回答)
+      return !!this.inputText.trim();
+    },
+
+    setObstetricChoice(qi, key, value) {
+      // formAnswers[qi] 对 obstetric 是个 dict {preg, lact};用 Object.assign 触发 Alpine 响应
+      this.formAnswers[qi] = Object.assign({}, this.formAnswers[qi] || {}, { [key]: value });
+    },
+
+    _labelForQuestion(q) {
+      // 提交时用的"问题简短标签",帮助 LLM 解析:对应 q.type / slot
+      if (q.type === 'obstetric')     return '妊娠/哺乳';
+      if (q.type === 'history')       return '病史(过敏/慢病/用药)';
+      if (q.type === 'open')          return '其他症状';
+      if (q.type === 'targeted')      return q.target || '针对性追问';
+      if (q.type === 'report_upload') return '检查报告上传';
+      if (q.type === 'slot') {
+        const m = {
+          onset_time: '起病时间', onset_mode: '起病方式', trigger: '诱因',
+          location: '部位', nature: '性质', severity: '程度',
+          duration_pattern: '时间规律', aggravating: '加重因素', relieving: '缓解因素',
+          associated_symptoms: '伴随症状', progression: '病程演变',
+          treatment_tried: '已用治疗', treatment_response: '治疗反应',
+        };
+        return m[q.slot] || q.slot || 'slot';
+      }
+      return q.type || 'question';
+    },
+
+    _serializeFormAnswers() {
+      // 把每个 q 的 formAnswers 拼成 "标签:答案" 段落,⑦ LLM 据此回填 slot/symptoms/obstetric/history;
+      // type=report_upload 走特殊分支,后端 ①.5 看到 "已上传" 关键字给 state 加 placeholder。
+      if (!this.pendingForm) return '';
+      const map = { yes: '是', no: '否', unknown: '不清楚' };
+      const lines = [];
+      this.pendingForm.questions.forEach((q, qi) => {
+        const label = this._labelForQuestion(q);
+        const a = this.formAnswers[qi];
+        if (q.type === 'obstetric') {
+          const parts = [];
+          if (a && a.preg) parts.push(`怀孕:${map[a.preg]}`);
+          if (a && a.lact) parts.push(`哺乳:${map[a.lact]}`);
+          if (parts.length) lines.push(`${label} — ${parts.join('; ')}`);
+        } else if (q.type === 'report_upload') {
+          const files = a?.files || [];
+          if (files.length) {
+            const names = files.map(f => f.name).join('、');
+            lines.push(`${label}:已上传 ${files.length} 个文件 — ${names}`);
+          } else if (a?.skip) {
+            lines.push(`${label}:无`);
+          }
+        } else {
+          const text = (a || '').trim();
+          if (text) lines.push(`${label}:${text}`);
+        }
+      });
+      return lines.join('\n');
+    },
+
+    onReportFilesPicked(qi, e) {
+      // 模拟上传:只收文件名,不发后端、不持久化(跟底栏上传按钮一致)
+      const files = Array.from(e.target.files || []);
+      const cur = this.formAnswers[qi] || {};
+      const list = (cur.files || []).slice();
+      for (const f of files) list.push({ name: f.name, size: f.size });
+      this.formAnswers[qi] = { ...cur, files: list, skip: false };
+      e.target.value = '';
+    },
+
+    removeReportFile(qi, fi) {
+      const cur = this.formAnswers[qi] || {};
+      const list = (cur.files || []).slice();
+      list.splice(fi, 1);
+      this.formAnswers[qi] = { ...cur, files: list };
+    },
+
+    async submitForm() {
+      if (this.thinking || !this.pendingForm) return;
+      const payload = this._serializeFormAnswers();
+      if (!payload) {
+        this.apiError = '请至少回答一项后再提交';
+        return;
+      }
+      this.messages.push({ role: 'user', text: payload });
+      // 清空 form 状态(下一轮服务端再触发新 pendingForm)
+      this.pendingForm = null;
+      this.formAnswers = {};
+      this.thinking = true;
+      this.apiError = '';
+      this.$nextTick(() => this.scrollBottom());
+      await this._postDiagnose({ session_id: this.sessionId, followup_answer: payload });
+    },
+
+    async send() {
+      const text = this.inputText.trim();
+      if (!text || this.thinking) return;
+      this.messages.push({ role: 'user', text });
+      this.inputText = '';
+      this.thinking = true;
+      this.apiError = '';
+      this.$nextTick(() => this.scrollBottom());
+
+      const body = this.sessionId
+        ? { session_id: this.sessionId, followup_answer: text }
+        : { patient_input: text };
+      await this._postDiagnose(body);
+    },
+
+    async _postDiagnose(body) {
+      // 走 SSE:fetch + ReadableStream 按行解析 `data: {...}\n\n`;
+      // progress event → currentProgress 灰字;interrupt/completed/error → 走原终态逻辑
+      this.currentProgress = '';
+      let gotTerminal = false;  // 收到 interrupt / completed / error 即视为正常终止
+      try {
+        const res = await fetch('/diagnose', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+            'Authorization': `Bearer ${this.token}`,
+          },
+          body: JSON.stringify(body),
+        });
+
+        if (res.status === 401) { this.logout(); return; }
+        if (!res.ok) {
+          // 4xx 仍走 JSON(SSE generator 启动前 raise HTTPException 那一段)
+          const errBody = await res.json().catch(() => ({}));
+          throw new Error(errBody.detail || `请求失败 (${res.status})`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          // SSE 消息以 \n\n 分隔
+          let idx;
+          while ((idx = buffer.indexOf('\n\n')) !== -1) {
+            const rawMsg = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
+            for (const line of rawMsg.split('\n')) {
+              if (!line.startsWith('data:')) continue;
+              let evt;
+              try { evt = JSON.parse(line.slice(5).trim()); }
+              catch { continue; }
+              gotTerminal = this._handleSseEvent(evt) || gotTerminal;
+            }
+          }
+        }
+
+        if (!gotTerminal) {
+          // 流正常关了但没收到任何终止 event — 后端 generator 异常退出
+          throw new Error('诊断服务连接中断,请稍后重试');
+        }
+      } catch (e) {
+        this.apiError = e.message || '请求失败';
+      } finally {
+        this.thinking = false;
+        this.currentProgress = '';
+        this.$nextTick(() => this.scrollBottom());
+      }
+    },
+
+    _handleSseEvent(evt) {
+      // 处理一条 SSE event;返回 true 表示终止 event(用于外层检测意外断流)
+      if (evt.event === 'progress') {
+        this.currentProgress = evt.text || '';
+        this.$nextTick(() => this.scrollBottom());
+        return false;
+      }
+      if (evt.event === 'interrupt') {
+        this.sessionId = evt.session_id || this.sessionId;
+        if (evt.status === 'ongoing_initial_ask'
+            || evt.status === 'ongoing_followup'
+            || evt.status === 'ongoing_report_upload') {
+          // 三种 form 类型走同一个 pendingForm 渲染机制(form template 按 q.type 分流)
+          const pq = evt.pending_questions || [];
+          if (pq.length) {
+            this.pendingForm = { questions: pq };
+            this.formAnswers = {};
+          } else {
+            this.pendingForm = null;
+            this.messages.push({
+              role: 'assistant',
+              text: evt.pending_question || '(系统未返回问题)',
+            });
+          }
+        } else if (evt.status === 'ongoing_exam') {
+          this.recommendedTests = evt.recommended_tests || [];
+          this.messages.push({
+            role: 'assistant',
+            text: '根据现有信息,我建议您先去医院做下列检查再回来:',
+          });
+        }
+        return true;
+      }
+      if (evt.event === 'completed') {
+        this.sessionId = evt.session_id || this.sessionId;
+        this.messages.push({
+          role: 'assistant',
+          text: evt.final_response || '(完成)',
+        });
+        this.diagnosis = evt.diagnosis_result || [];
+        this.medication = evt.medication_advice || [];
+        this.risks = evt.risk_warnings || [];
+        this.recommendedTests = evt.recommended_tests || null;
+        return true;
+      }
+      if (evt.event === 'error') {
+        this.apiError = evt.detail || '诊断服务暂不可用';
+        return true;
+      }
+      return false;
+    },
+
+    autoGrow(el) {
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 128) + 'px';
+    },
+
+    scrollBottom() {
+      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    },
+
+    onFilesPicked(e) {
+      // 模拟上传:只收文件名,不发后端、不持久化
+      const files = Array.from(e.target.files || []);
+      for (const f of files) {
+        this.uploadedFiles.push({ name: f.name, size: f.size });
+      }
+      e.target.value = '';  // 允许重复选同名文件
+      if (!files.length) return;
+      this.uploadToast = `已收到 ${files.length} 个文件(模拟,本 demo 不发后端解析)`;
+      clearTimeout(this._uploadToastTimer);
+      this._uploadToastTimer = setTimeout(() => { this.uploadToast = ''; }, 3000);
+    },
+  };
+}
+</script>
+
+<style>
+  [x-cloak] { display: none !important; }
+</style>
+
+</body>
+</html>

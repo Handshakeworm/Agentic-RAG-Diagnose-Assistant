@@ -1,13 +1,21 @@
 """问诊接口(DEV_SPEC §8.4 G4 + §9.6)。
 
-`POST /diagnose` 把 F 阶段 LangGraph app 接进 HTTP:
-- 首次:建 sessions 行 → invoke graph(initial_state)
-- 追问/检查回传:用 LangGraph `Command(resume=...)` 恢复 interrupt
-- 终态:按 §9.6.2 / §9.6.5 裸代码模板写一行 rag_trace 15 字段 + conversations
-- 任意轮 graph 抛异常:logger.error + 500;rag_trace 写不写以是否到达终态为准
+`POST /diagnose` 走 **SSE 流式**:每跑完一个节点推一条 `progress` event(供前端
+"灰字告诉用户系统进行到哪一步了"),最后推 `interrupt`(追问/检查回传)
+或 `completed`(终态)或 `error`(异常)。
 
-实现风格按 §9.6.5 强制:**不**封装 AuditWriter / @audit_rag_trace 装饰器,
-所有字段在视图函数内裸组装。
+为什么不是 JSON 一发一收:用户等待 5~15s 期间需要"有事干 + 安全感"的进度反馈,
+LangGraph 的 `astream(stream_mode="updates")` 天然按 super-step 逐节点 yield,
+直接转成 SSE 即可。
+
+事件协议(`data: <json>\\n\\n`):
+- `{event: "progress", node, text}`               每个非 interrupt 节点完成后
+- `{event: "interrupt", session_id, status, ...}` 走到 wait_followup_answer / wait_exam_report
+- `{event: "completed", session_id, status, ...}` 终态(format_response 出 END)
+- `{event: "error",     session_id, detail}`      任意节点抛异常
+
+终态写 rag_trace + conversations 与原同步实现完全一致(§9.6.2 / §9.6.5 裸代码
+模板),只是发生时机改到 generator 内最后一个 yield 之前。
 
 ⚠️ TODO(留给用户拍板):
 - checkpointer 当前用 `InMemorySaver` 模块级单例 — 进程重启会丢 in-flight session;
@@ -19,12 +27,14 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
-import uuid
+from collections.abc import AsyncGenerator
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 from sqlalchemy.orm import Session as OrmSession
 
@@ -33,13 +43,37 @@ from src.agent.graph import build_app
 from src.agent.state import MedicalState
 from src.api.middleware.auth_middleware import CurrentUser, get_current_user
 from src.api.routes.auth import get_db  # 复用 G2 的 session Depends
-from src.api.schemas.diagnosis_schema import DiagnoseRequest, DiagnoseResponse
+from src.api.schemas.diagnosis_schema import DiagnoseRequest
 from src.db.postgres.models_audit import RagTrace
 from src.db.postgres.models_dialog import Conversation, Session as SessionRow
 
 
 _logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 节点 → 用户可见进度文案(灰字)
+# ────────────────────────────────────────────────────────────────────────────
+# 文案放后端一处统一维护,前端只渲染 text;不在此处的节点(wait_*)走 interrupt
+# event,不推 progress(避免"等待您的回答"被误当成系统在干活)。
+_NODE_PROGRESS_TEXT: dict[str, str] = {
+    "initial_ask":                   "正在加载您的档案…",
+    "info_collect":                  "正在理解您的主诉…",
+    "analyze_initial_reports":       "正在分析检查报告…",
+    "intake_followup_ask":           "正在准备需要确认的细节…",
+    "generate_followup":             "正在生成追问…",
+    "process_followup_answer":       "正在解析您的回答…",
+    "build_query":                   "正在构造检索查询…",
+    "retrieve":                      "正在检索医学知识库…",
+    "select_discriminative_symptom": "正在分析关键症状…",
+    "diagnose":                      "正在综合诊断(三步推理)…",
+    "recommend_exam":                "正在评估需要的检查…",
+    "process_exam_result":           "正在处理检查结果…",
+    "safety_gate":                   "正在做安全核查…",
+    "generate_advice":               "正在生成用药建议…",
+    "format_response":               "正在整理回复…",
+}
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -57,7 +91,7 @@ def _get_compiled_graph():
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# 辅助:rag_trace error_info 派生(spec §9.6.3)
+# 辅助:rag_trace error_info 派生(spec §9.6.3) + SSE 编码
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -77,6 +111,11 @@ def _build_error_info(diagnosis_result: list[dict]) -> dict | None:
     return {"source": "diagnose", "failure_reason": reason, "step": step}
 
 
+def _sse(payload: dict) -> str:
+    """SSE 一条消息:`data: <json>\\n\\n`(空行表示消息结束,符合 EventSource 协议)。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # 主端点
 # ────────────────────────────────────────────────────────────────────────────
@@ -84,15 +123,14 @@ def _build_error_info(diagnosis_result: list[dict]) -> dict | None:
 
 @router.post(
     "/diagnose",
-    response_model=DiagnoseResponse,
-    summary="问诊主接口(支持多轮追问 / 检查回传)",
+    summary="问诊主接口(SSE 流式,支持多轮追问 / 检查回传)",
 )
 async def diagnose(
     req: DiagnoseRequest,
     current_user: CurrentUser = Depends(get_current_user),
     db: OrmSession = Depends(get_db),
-) -> DiagnoseResponse:
-    # ─── 1. session 寻址或新建 ───────────────────────────────────────
+) -> StreamingResponse:
+    # ─── 1. session 寻址或新建(同步操作,放 generator 外提早暴露 4xx) ───
     if req.session_id:
         sess: SessionRow | None = db.get(SessionRow, req.session_id)
         if sess is None:
@@ -117,14 +155,11 @@ async def diagnose(
     config = {"configurable": {"thread_id": f"session_{session_id}"}}
 
     if is_first_round:
-        # 首次:用初始 State 拉起 graph
         graph_input: MedicalState | Command = MedicalState(
             patient_id=current_user.user_id,
             patient_input=req.patient_input or "",
         )
     else:
-        # 后续:用 Command(resume=...) 恢复 interrupt
-        # interrupt 节点写回 followup_answer(str) 或 pending_exam_results(list[dict])
         if req.followup_answer is not None:
             graph_input = Command(resume=req.followup_answer)
         elif req.exam_results is not None:
@@ -135,117 +170,173 @@ async def diagnose(
                 "后续轮必须提供 followup_answer 或 exam_results 之一",
             )
 
-    # ─── 3. 跑 graph(同步 invoke,interrupt 自然返回)─────────────────
-    t0 = time.perf_counter()
-    try:
-        # ainvoke 走 async,但 graph 内部节点都是同步函数 — langgraph 自己 sched
-        final_or_interrupt = await graph_app.ainvoke(graph_input, config=config)
-    except Exception as e:
-        _logger.error(
-            "graph invoke failed for session %s: %s", session_id, e, exc_info=True
-        )
-        raise HTTPException(500, "诊断服务暂不可用,请稍后再试") from e
-    invoke_latency_ms = int((time.perf_counter() - t0) * 1000)
+    # ─── 3. SSE generator:逐节点推 progress,终态/interrupt/异常推终止 event ───
+    async def event_stream() -> AsyncGenerator[str, None]:
+        t0 = time.perf_counter()
+        try:
+            # 改用 astream_events(version="v2"):比 stream_mode="updates" 多了 on_chain_start
+            # 事件 —— 节点**进入时**触发,灰字推送和实际节点执行同步,不再延迟一拍卡在上一个文案。
+            # 过滤条件:event=="on_chain_start" 且 name 在 mapping 里(LangGraph 把每个 node
+            # 注册为 chain,name = add_node() 时给的名字;sub-runnable 不在 mapping 不会推)。
+            async for ev in graph_app.astream_events(
+                graph_input, config=config, version="v2"
+            ):
+                if ev.get("event") != "on_chain_start":
+                    continue
+                name = ev.get("name") or ""
+                text = _NODE_PROGRESS_TEXT.get(name)
+                if text:
+                    yield _sse({"event": "progress", "node": name, "text": text})
 
-    # ─── 4. 判终态 vs interrupt ───────────────────────────────────────
-    # interrupt 时 final_or_interrupt 仍是 dict-like state(LangGraph 0.2+ 行为):
-    # 通过 graph_app.aget_state 拿 next 元组判断是否还有节点待跑
-    snapshot = await graph_app.aget_state(config)
-    has_pending = bool(snapshot.next)
+            invoke_latency_ms = int((time.perf_counter() - t0) * 1000)
 
-    # State 投影回 MedicalState 方便字段访问(snapshot.values 可能是 dict 也可能是 model)
-    state_dict = (
-        snapshot.values
-        if isinstance(snapshot.values, dict)
-        else snapshot.values.model_dump()
-    )
-
-    if has_pending:
-        # interrupt 触发,snapshot.next 含暂停在哪个节点
-        next_node = snapshot.next[0] if snapshot.next else ""
-        if next_node == "wait_followup_answer":
-            return DiagnoseResponse(
-                session_id=session_id,
-                status="ongoing_followup",
-                pending_question=state_dict.get("followup_question") or "",
+            # ─── 4. astream_events 退出 → 要么 interrupt 要么 END,看 snapshot.next ───
+            snapshot = await graph_app.aget_state(config)
+            has_pending = bool(snapshot.next)
+            state_dict = (
+                snapshot.values
+                if isinstance(snapshot.values, dict)
+                else snapshot.values.model_dump()
             )
-        if next_node == "wait_exam_report":
-            return DiagnoseResponse(
+
+            if has_pending:
+                next_node = snapshot.next[0] if snapshot.next else ""
+                if next_node in ("initial_ask", "intake_followup_ask"):
+                    # ⓪a 节点入口 interrupt(综合 form);intake 节点内 multi-interrupt(slot batch form)
+                    # 两者都把 payload 塞在 interrupt(...) 调用里(state 还没 commit)→ 从
+                    # snapshot.tasks[*].interrupts[*].value 拿;status 区分前端文案
+                    payload: dict = {}
+                    for task in (snapshot.tasks or []):
+                        for it in (getattr(task, "interrupts", None) or []):
+                            if isinstance(getattr(it, "value", None), dict):
+                                payload = it.value
+                                break
+                        if payload:
+                            break
+                    status = (
+                        "ongoing_initial_ask" if next_node == "initial_ask"
+                        else "ongoing_followup"  # intake batch 跟普通追问共用前端渲染
+                    )
+                    yield _sse({
+                        "event": "interrupt",
+                        "session_id": session_id,
+                        "status": status,
+                        "pending_question": payload.get("followup_question") or "",
+                        "pending_questions": list(payload.get("followup_questions") or []),
+                    })
+                elif next_node == "wait_followup_answer":
+                    yield _sse({
+                        "event": "interrupt",
+                        "session_id": session_id,
+                        "status": "ongoing_followup",
+                        "pending_question": state_dict.get("followup_question") or "",
+                        "pending_questions": list(state_dict.get("followup_questions") or []),
+                    })
+                elif next_node == "wait_exam_report":
+                    yield _sse({
+                        "event": "interrupt",
+                        "session_id": session_id,
+                        "status": "ongoing_exam",
+                        "recommended_tests": list(state_dict.get("recommended_tests") or []),
+                    })
+                elif next_node == "analyze_initial_reports":
+                    # ①.5 节点内 interrupt:问"要不要上传报告"。payload 文案见
+                    # analyze_initial_reports.INITIAL_REPORT_UPLOAD_PROMPT(单点维护)
+                    from src.agent.nodes.analyze_initial_reports import (
+                        INITIAL_REPORT_UPLOAD_PROMPT,
+                    )
+                    yield _sse({
+                        "event": "interrupt",
+                        "session_id": session_id,
+                        "status": "ongoing_report_upload",
+                        "pending_questions": [INITIAL_REPORT_UPLOAD_PROMPT],
+                    })
+                else:
+                    # 不预期的 interrupt 节点 — 防御日志,按追问处理(总比 500 强)
+                    _logger.warning(
+                        "session %s interrupt at unexpected node %s",
+                        session_id, next_node,
+                    )
+                    yield _sse({
+                        "event": "interrupt",
+                        "session_id": session_id,
+                        "status": "ongoing_followup",
+                        "pending_question": state_dict.get("followup_question") or "(等待用户输入)",
+                    })
+                return
+
+            # ─── 5. 终态:按 §9.6.5 裸代码模板写 rag_trace + conversation ─────
+            s = state_dict
+            trace_row = RagTrace(
                 session_id=session_id,
-                status="ongoing_exam",
-                recommended_tests=list(state_dict.get("recommended_tests") or []),
+                user_id=current_user.user_id,
+                raw_query=s.get("patient_input") or "",
+                intent_result={
+                    "chief_complaint": s.get("chief_complaint"),
+                    "confirmed_symptoms": s.get("confirmed_symptoms") or [],
+                    "denied_symptoms": s.get("denied_symptoms") or [],
+                    "standardized_entities": s.get("standardized_entities") or [],
+                },
+                retrieved_chunks=s.get("candidate_chunks") or [],
+                reranked_chunks=s.get("last_reranked_chunks") or [],
+                final_prompt=s.get("last_diagnose_prompt"),
+                llm_raw_output=s.get("last_diagnose_raw_output"),
+                final_response=s.get("final_response") or "",
+                model_name=settings.llm.MODEL_NAME,
+                token_usage=s.get("session_token_usage") or {
+                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
+                },
+                latency_ms={
+                    **(s.get("session_latency_ms") or {}),
+                    "total": invoke_latency_ms,
+                },
+                error_info=_build_error_info(s.get("diagnosis_result") or []),
             )
-        # 不预期的 interrupt 节点 — 防御日志,按追问处理(总比 500 强)
-        _logger.warning(
-            "session %s interrupt at unexpected node %s", session_id, next_node
-        )
-        return DiagnoseResponse(
-            session_id=session_id,
-            status="ongoing_followup",
-            pending_question=state_dict.get("followup_question") or "(等待用户输入)",
-        )
+            conv_row = Conversation(
+                session_id=session_id,
+                user_id=current_user.user_id,
+                user_input=s.get("patient_input") or "",
+                llm_output=s.get("final_response") or "",
+                rag_context={
+                    "chunk_ids": [
+                        c.get("source_chunk_id")
+                        for c in (s.get("last_reranked_chunks") or [])
+                        if c.get("source_chunk_id")
+                    ],
+                },
+            )
+            # spec §9.6.1 事务性:写失败不阻塞响应,但 error 日志告警
+            try:
+                db.add(trace_row)
+                db.add(conv_row)
+                db.flush()
+            except Exception:
+                db.rollback()
+                _logger.error(
+                    "rag_trace / conversation write failed for session %s",
+                    session_id,
+                    exc_info=True,
+                )
 
-    # ─── 5. 终态:按 §9.6.5 裸代码模板写 rag_trace + conversation ─────
-    s = state_dict
-    trace_row = RagTrace(
-        session_id=session_id,
-        user_id=current_user.user_id,
-        raw_query=s.get("patient_input") or "",
-        intent_result={
-            "chief_complaint": s.get("chief_complaint"),
-            "confirmed_symptoms": s.get("confirmed_symptoms") or [],
-            "denied_symptoms": s.get("denied_symptoms") or [],
-            "standardized_entities": s.get("standardized_entities") or [],
-        },
-        retrieved_chunks=s.get("candidate_chunks") or [],
-        reranked_chunks=s.get("last_reranked_chunks") or [],
-        final_prompt=s.get("last_diagnose_prompt"),       # 正常路径 None → DB NULL
-        llm_raw_output=s.get("last_diagnose_raw_output"),
-        final_response=s.get("final_response") or "",
-        model_name=settings.llm.MODEL_NAME,
-        token_usage=s.get("session_token_usage") or {
-            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
-        },
-        latency_ms={
-            **(s.get("session_latency_ms") or {}),
-            "total": invoke_latency_ms,
-        },
-        error_info=_build_error_info(s.get("diagnosis_result") or []),
-    )
+            yield _sse({
+                "event": "completed",
+                "session_id": session_id,
+                "status": "completed",
+                "final_response": s.get("final_response"),
+                "diagnosis_result": s.get("diagnosis_result") or [],
+                "medication_advice": s.get("medication_advice") or [],
+                "risk_warnings": s.get("risk_warnings") or [],
+            })
 
-    conv_row = Conversation(
-        session_id=session_id,
-        user_id=current_user.user_id,
-        user_input=s.get("patient_input") or "",
-        llm_output=s.get("final_response") or "",
-        rag_context={
-            "chunk_ids": [
-                c.get("source_chunk_id")
-                for c in (s.get("last_reranked_chunks") or [])
-                if c.get("source_chunk_id")
-            ],
-        },
-    )
+        except Exception as e:
+            _logger.error(
+                "graph stream failed for session %s: %s", session_id, e, exc_info=True
+            )
+            # SSE 已经发了头,不能 raise HTTPException;吐一条 error event 让前端兜底
+            yield _sse({
+                "event": "error",
+                "session_id": session_id,
+                "detail": "诊断服务暂不可用,请稍后再试",
+            })
 
-    # spec §9.6.1 事务性:rag_trace / conversation 写失败不阻塞响应,但 error 日志告警
-    try:
-        db.add(trace_row)
-        db.add(conv_row)
-        db.flush()
-    except Exception:
-        db.rollback()
-        _logger.error(
-            "rag_trace / conversation write failed for session %s",
-            session_id,
-            exc_info=True,
-        )
-        # 不 raise:响应仍要给用户
-
-    return DiagnoseResponse(
-        session_id=session_id,
-        status="completed",
-        final_response=s.get("final_response"),
-        diagnosis_result=s.get("diagnosis_result") or [],
-        medication_advice=s.get("medication_advice") or [],
-        risk_warnings=s.get("risk_warnings") or [],
-    )
+    return StreamingResponse(event_stream(), media_type="text/event-stream")

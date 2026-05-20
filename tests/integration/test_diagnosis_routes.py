@@ -1,15 +1,18 @@
 """tests/integration/test_diagnosis_routes.py — G4 POST /diagnose 闭环。
 
-graph 用 mock 替换(真跑会调 LLM/Embedding/Reranker,慢 + 烧 token)。
-mock 模拟三种 graph 形态:
-- 首轮立刻终态 → status="completed" + rag_trace + conversation 写入
-- 首轮 interrupt → status="ongoing_followup" + pending_question
-- resume 后终态 → 同上 + rag_trace 写入
+接口走 **SSE 流式**(`text/event-stream`),test 用 `_read_sse_events` 把响应正文按
+`data: <json>\\n\\n` 切回 dict 列表,断言最后一条终止 event(`completed` / `interrupt` /
+`error`),其余 `progress` event 不参与功能断言。
+
+graph 用 mock 替换(真跑会调 LLM/Embedding/Reranker,慢 + 烧 token)。mock 同时
+桩 `astream`(async generator yield 节点 update)和 `aget_state`(snapshot.next 决定
+终止 event 类型)。
 
 需 PG 真服务在跑 + alembic upgrade head。
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import uuid
@@ -74,22 +77,83 @@ def patient_token():
         s.execute(text("DELETE FROM users WHERE id = :uid"), {"uid": user_id})
 
 
-def _mock_graph_completed(final_state: dict) -> MagicMock:
-    """mock graph 立刻终态:ainvoke 返 final_state,aget_state next 空。"""
+def _make_astream_events(events: list[dict]):
+    """构造 graph.astream_events 替身:被调用即返一个 async iterator,逐条 yield event。
+
+    `astream_events` 的真签名:`def astream_events(input, config=..., version=...) -> AsyncIterator[dict]`。
+    最小可用 event 形态 `{"event": "on_chain_start", "name": "<node>"}` —— diagnosis.py 只用这两个字段。
+    """
+    async def _astream_events(*args, **kwargs):
+        for e in events:
+            yield e
+    return _astream_events
+
+
+def _node_start_events(node_names: list[str]) -> list[dict]:
+    """方便构造一连串"节点 X 进入"事件,模拟 graph 走过几个节点。"""
+    return [{"event": "on_chain_start", "name": n} for n in node_names]
+
+
+def _mock_graph_completed(
+    final_state: dict, events: list[dict] | None = None
+) -> MagicMock:
+    """mock graph 立刻终态:astream_events 跑完 → aget_state.next 为空 → 路由进 completed 分支。"""
     g = MagicMock()
-    g.ainvoke = AsyncMock(return_value=final_state)
+    # 默认推一条 format_response 进入事件,SSE 至少会出一条 progress(便于断言节点确实被流出)
+    g.astream_events = _make_astream_events(
+        events or _node_start_events(["format_response"])
+    )
     snapshot = MagicMock(values=final_state, next=())
     g.aget_state = AsyncMock(return_value=snapshot)
     return g
 
 
-def _mock_graph_interrupt(state_dict: dict, next_node: str) -> MagicMock:
-    """mock graph 暂停在 next_node。"""
+def _mock_graph_interrupt(
+    state_dict: dict,
+    next_node: str,
+    events: list[dict] | None = None,
+    interrupt_payload: dict | None = None,
+) -> MagicMock:
+    """mock graph 暂停在 next_node。
+
+    `interrupt_payload`:模拟节点内 `interrupt(payload)` 时,LangGraph 把 payload 存在
+    snapshot.tasks[0].interrupts[0].value 的行为(diagnosis.py 的 initial_ask 分支
+    会从这里取 followup_questions —— 因为节点 return 还没执行,state 未 commit)。
+    """
     g = MagicMock()
-    g.ainvoke = AsyncMock(return_value=state_dict)
-    snapshot = MagicMock(values=state_dict, next=(next_node,))
+    g.astream_events = _make_astream_events(
+        events or _node_start_events(["info_collect"])
+    )
+    if interrupt_payload is not None:
+        mock_interrupt = MagicMock(value=interrupt_payload)
+        mock_task = MagicMock(interrupts=[mock_interrupt])
+        snapshot = MagicMock(values=state_dict, next=(next_node,), tasks=[mock_task])
+    else:
+        snapshot = MagicMock(values=state_dict, next=(next_node,), tasks=[])
     g.aget_state = AsyncMock(return_value=snapshot)
     return g
+
+
+def _read_sse_events(resp) -> list[dict]:
+    """把 SSE 流响应正文切回 event dict 列表。
+
+    SSE 格式:`data: <json>\\n\\n`(空行分隔消息)。本 helper 只取 `data:` 行的 JSON;
+    忽略 event/id/retry 等其它 SSE 字段(本服务没用)。
+    """
+    events: list[dict] = []
+    for raw_msg in resp.text.split("\n\n"):
+        for line in raw_msg.split("\n"):
+            if line.startswith("data:"):
+                events.append(json.loads(line[len("data:"):].strip()))
+    return events
+
+
+def _terminal_event(events: list[dict]) -> dict:
+    """从 SSE event 序列里取最后一条非 progress(= interrupt/completed/error 之一)。"""
+    for evt in reversed(events):
+        if evt.get("event") in ("interrupt", "completed", "error"):
+            return evt
+    raise AssertionError(f"no terminal event in SSE stream; got: {events}")
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -170,14 +234,16 @@ def test_first_round_completed_writes_rag_trace(
         json={"patient_input": "腹痛三天"},
     )
     assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["status"] == "completed"
-    assert body["session_id"]
-    assert body["final_response"] == "建议查胃镜"
-    assert body["diagnosis_result"][0]["disease"] == "胃炎"
-    assert body["risk_warnings"] == ["如出现呕血请急诊"]
+    events = _read_sse_events(resp)
+    terminal = _terminal_event(events)
+    assert terminal["event"] == "completed"
+    assert terminal["status"] == "completed"
+    assert terminal["session_id"]
+    assert terminal["final_response"] == "建议查胃镜"
+    assert terminal["diagnosis_result"][0]["disease"] == "胃炎"
+    assert terminal["risk_warnings"] == ["如出现呕血请急诊"]
 
-    sid = body["session_id"]
+    sid = terminal["session_id"]
     with session_scope() as s:
         # sessions 行
         cnt = s.execute(
@@ -261,7 +327,7 @@ def test_failure_path_writes_error_info(
         json={"patient_input": "x"},
     )
     assert resp.status_code == 200
-    sid = resp.json()["session_id"]
+    sid = _terminal_event(_read_sse_events(resp))["session_id"]
 
     with session_scope() as s:
         row = s.execute(
@@ -302,10 +368,11 @@ def test_first_round_interrupt_returns_ongoing_followup(
         json={"patient_input": "胃疼"},
     )
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ongoing_followup"
-    assert body["pending_question"] == "疼痛多久了?"
-    assert body["session_id"]
+    terminal = _terminal_event(_read_sse_events(resp))
+    assert terminal["event"] == "interrupt"
+    assert terminal["status"] == "ongoing_followup"
+    assert terminal["pending_question"] == "疼痛多久了?"
+    assert terminal["session_id"]
 
 
 def test_interrupt_at_wait_exam_report_returns_ongoing_exam(
@@ -328,9 +395,71 @@ def test_interrupt_at_wait_exam_report_returns_ongoing_exam(
         json={"patient_input": "胃疼"},
     )
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == "ongoing_exam"
-    assert body["recommended_tests"] == ["胃镜", "幽门螺杆菌检测"]
+    terminal = _terminal_event(_read_sse_events(resp))
+    assert terminal["event"] == "interrupt"
+    assert terminal["status"] == "ongoing_exam"
+    assert terminal["recommended_tests"] == ["胃镜", "幽门螺杆菌检测"]
+
+
+def test_interrupt_at_initial_ask_returns_initial_form(
+    client: TestClient, patient_token, monkeypatch
+) -> None:
+    """⓪a 节点内 interrupt → status=ongoing_initial_ask + pending_questions 含 open/history/(obstetric)。"""
+    token, _, _ = patient_token
+    state = {"patient_input": "腹痛"}  # ⓪a 入口 interrupt,state 还没 commit
+    interrupt_payload = {
+        "followup_question": "您还有其他不适吗?\n\n您有过敏/慢病/长期用药吗?",
+        "followup_questions": [
+            {"type": "open", "question": "您还有其他不适吗?"},
+            {"type": "history", "question": "您有过敏/慢病/长期用药吗?"},
+        ],
+    }
+    monkeypatch.setattr(
+        "src.api.routes.diagnosis._get_compiled_graph",
+        lambda: _mock_graph_interrupt(
+            state, "initial_ask", interrupt_payload=interrupt_payload
+        ),
+    )
+
+    resp = client.post(
+        "/diagnose",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"patient_input": "腹痛"},
+    )
+    assert resp.status_code == 200
+    terminal = _terminal_event(_read_sse_events(resp))
+    assert terminal["event"] == "interrupt"
+    assert terminal["status"] == "ongoing_initial_ask"
+    pq = terminal["pending_questions"]
+    types = {q["type"] for q in pq}
+    assert "open" in types
+    assert "history" in types
+
+
+def test_interrupt_at_analyze_initial_reports_returns_report_upload(
+    client: TestClient, patient_token, monkeypatch
+) -> None:
+    """①.5 节点内 interrupt → status=ongoing_report_upload + pending_questions 含 report_upload 项。"""
+    token, _, _ = patient_token
+    state = {"patient_input": "腹痛"}
+    monkeypatch.setattr(
+        "src.api.routes.diagnosis._get_compiled_graph",
+        lambda: _mock_graph_interrupt(state, "analyze_initial_reports"),
+    )
+
+    resp = client.post(
+        "/diagnose",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"patient_input": "腹痛"},
+    )
+    assert resp.status_code == 200
+    terminal = _terminal_event(_read_sse_events(resp))
+    assert terminal["event"] == "interrupt"
+    assert terminal["status"] == "ongoing_report_upload"
+    pq = terminal["pending_questions"]
+    assert len(pq) == 1
+    assert pq[0]["type"] == "report_upload"
+    assert "检查报告" in pq[0]["question"]
 
 
 # ────────────────────────────────────────────────────────────────────────────

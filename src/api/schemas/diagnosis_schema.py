@@ -52,7 +52,15 @@ class DiagnoseResponse(BaseModel):
     status: DiagnoseStatus
 
     pending_question: str | None = Field(
-        None, description="待用户回答的追问。status='ongoing_followup' 时非空"
+        None, description="待用户回答的追问(完整文本)。status='ongoing_followup' 时非空"
+    )
+    pending_questions: list[dict[str, Any]] | None = Field(
+        None,
+        description=(
+            "结构化追问条目(state.followup_questions 镜像),供前端按 type 渲染输入控件。"
+            "例如 type=obstetric 渲染 yes/no 按钮,type=slot/open/history/targeted 渲染文本框。"
+            "status='ongoing_followup' 时非空,前端可选用;后端 ⑦ 仍按 followup_answer 文本解析。"
+        ),
     )
     recommended_tests: list[str] | None = Field(
         None,
