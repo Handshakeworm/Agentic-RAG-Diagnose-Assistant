@@ -68,19 +68,32 @@ def info_collect(state: MedicalState) -> dict:
         _logger.error("[%s] structured output failed: %s", _NODE, e, exc_info=True)
         raise  # 中安全:抛回 graph,终止会话(无主诉无法继续)
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
     # ─── 把 ⓪a form 答案的解析结果 merge 进 state(复用 ⑦ 的 helper)───
     new_medical_history = _merge_obstetric_fills(state.medical_history, result.obstetric_fills)
     new_medical_history = _merge_history_fills(new_medical_history, result.history_fills)
 
     confirmed = list(state.confirmed_symptoms)
-    already_known = set(confirmed) | set(state.denied_symptoms) | set(state.uncertain_symptoms)
-    for term in (result.new_symptoms or []):
+    denied = list(state.denied_symptoms)
+    uncertain = list(state.uncertain_symptoms)
+
+    # 症状三分类合并:LLM 按语气把 ⓪a form open 题 + patient_input 提及的症状
+    # 分到 confirmed/denied/uncertain,供下游 ⑤ 去重避免重复追问已知症状。
+    already_known = set(confirmed) | set(denied) | set(uncertain)
+    for term in (result.confirmed_symptoms or []):
         if term and term not in already_known:
             confirmed.append(term)
+            already_known.add(term)
+    for term in (result.denied_symptoms or []):
+        if term and term not in already_known:
+            denied.append(term)
+            already_known.add(term)
+    for term in (result.uncertain_symptoms or []):
+        if term and term not in already_known:
+            uncertain.append(term)
             already_known.add(term)
 
     return {
@@ -91,4 +104,6 @@ def info_collect(state: MedicalState) -> dict:
         ),
         "medical_history": new_medical_history,
         "confirmed_symptoms": confirmed,
+        "denied_symptoms": denied,
+        "uncertain_symptoms": uncertain,
     }

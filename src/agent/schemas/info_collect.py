@@ -54,9 +54,29 @@ class InfoCollectOutput(BaseModel):
     )
 
     # ─── ⓪a form 答案解析(原 FollowupParseResult 同构,只是 ① 节点合并承担) ───
-    new_symptoms: list[str] = Field(
+    # 症状三分类:明确确认 / 明确否认 / 模糊不定。LLM 按患者语气判,
+    # 下游 ⑤ generate_followup 拿三个列表去重,避免重复追问已知症状。
+    confirmed_symptoms: list[str] = Field(
         default_factory=list,
-        description="⓪a form 的 open 题里患者主动提到的额外症状(主诉之外),也包括患者顺带补充的副症状",
+        description=(
+            "⓪a form 的 open 题 + patient_input 里**明确确认**的症状(语气肯定):"
+            "如'右上腹疼'/'有点恶心'。**只含 form/自述里提到的,主诉本身不要重复**。"
+        ),
+    )
+    denied_symptoms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "⓪a form 的 open 题 + patient_input 里**明确否认**的症状(原文有'没'/'不'+症状):"
+            "如'没吐'/'不发烧'/'没腹泻'。**只识别明确否认**,完全没提到的不要列。"
+        ),
+    )
+    uncertain_symptoms: list[str] = Field(
+        default_factory=list,
+        description=(
+            "⓪a form 的 open 题 + patient_input 里**模糊/不确定**语气提及的症状:"
+            "如'可能有点头晕'/'好像偶尔会咳'/'不太确定有没有发烧'。"
+            "区别于 confirmed(语气肯定)和 denied(明确否认)。"
+        ),
     )
     obstetric_fills: dict[str, bool | None] | None = Field(
         None,

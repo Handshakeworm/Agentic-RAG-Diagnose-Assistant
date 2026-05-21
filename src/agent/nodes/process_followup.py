@@ -6,6 +6,12 @@ build_query 复跑流水线。
 ④ 已重设计为只产 slot / open 两类追问,⑦ 不再有"症状级 yes/no 回答分流"分支 —
 开放式追问得到的新症状统一进 `new_symptoms` 字段,本节点直接 append 到 confirmed_symptoms。
 
+**模型选择**:用 `settings.llm.FAST_MODEL_NAME`(deepseek-v4-flash),不走主链路 pro reasoner。
+任务性质是"把患者自由文本归类到 slot/symptom/history",纯文本结构化,不需要 reasoner
+推理深度;且 pro reasoner 对本 schema(FollowupParseResult 含 union value + Optional dict)
+在 thinking 阶段会自由发挥字段名,导致 LangChain with_retry 反复重试,单次拖到 2 分钟。
+flash 非 thinking,1-3 秒结束;参考 info_collect 用 flash 跑同类任务一直稳。
+
 中安全等级:失败 → 抛异常终止会话(回答未解析将导致信息丢失,不能静默)。
 """
 from __future__ import annotations
@@ -13,6 +19,7 @@ from __future__ import annotations
 import logging
 import time
 
+from config.settings import settings
 from src.agent.schemas.followup import FollowupParseResult
 from src.agent.state import SLOT_UNKNOWN_SENTINEL, MedicalState, PresentIllnessSlots
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
@@ -192,7 +199,9 @@ def parse_followup_response(
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(FollowupParseResult, method="json_mode").with_retry(stop_after_attempt=3)
+        chain = get_llm(model=settings.llm.FAST_MODEL_NAME).with_structured_output(
+            FollowupParseResult, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         result: FollowupParseResult = chain.invoke(
             prompt,
             config={
@@ -207,19 +216,29 @@ def parse_followup_response(
         _logger.error("[%s] structured output failed: %s", _NODE, e, exc_info=True)
         raise  # 中安全:抛回 graph
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] parse_followup_response flash elapsed=%.2fs", _NODE, elapsed)
 
     confirmed = list(state.confirmed_symptoms)
     denied = list(state.denied_symptoms)
     uncertain = list(state.uncertain_symptoms)
 
-    # spec §4.1.2 ⑦:开放式追问的新症状 + 患者顺带补充的副症状,统一进 confirmed_symptoms。
+    # 症状三分类合并:LLM 按语气把患者提及的症状分到 confirmed/denied/uncertain。
+    # intake 路径不经过 ② build_query,如果不在此处写,⑤ 第一次进来时 denied/uncertain
+    # 永远是空,会反复问"呕吐没?"/"头晕没?"已经回答过的症状。
     already_known = set(confirmed) | set(denied) | set(uncertain)
-    for term in result.new_symptoms:
+    for term in result.confirmed_symptoms:
         if term and term not in already_known:
             confirmed.append(term)
+            already_known.add(term)
+    for term in result.denied_symptoms:
+        if term and term not in already_known:
+            denied.append(term)
+            already_known.add(term)
+    for term in result.uncertain_symptoms:
+        if term and term not in already_known:
+            uncertain.append(term)
             already_known.add(term)
 
     new_slots = _apply_slot_fills(state.present_illness_slots, result.slot_fills)

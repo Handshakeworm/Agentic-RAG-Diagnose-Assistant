@@ -79,9 +79,9 @@ def _call_ner(text: str) -> NERResult:
         _logger.error("[%s] NER failed: %s", node, e, exc_info=True)
         raise
     finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=node, schema=schema).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", node, elapsed)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -121,9 +121,9 @@ def _call_query_construction(
         _logger.error("[%s] query construction failed: %s", node, e, exc_info=True)
         raise
     finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=node, schema=schema).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", node, elapsed)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -157,6 +157,7 @@ def build_query(state: MedicalState) -> dict:
 
     confirmed_symptoms = list(state.confirmed_symptoms)
     denied_symptoms = list(state.denied_symptoms)
+    uncertain_symptoms = list(state.uncertain_symptoms)
 
     # ─── Step 1: NER(check path 跳过,首轮对 chief+present,后续轮对 answer)───
     if not is_check_path:
@@ -174,7 +175,7 @@ def build_query(state: MedicalState) -> dict:
         else:
             entities = []
 
-        # 首轮主诉症状初始化:symptom 类(temporality=current)按 negation 分流
+        # 首轮主诉症状初始化:symptom 类(temporality=current)按 certainty 三分流
         # 直接用 NER 原文(无 EL,不做归一化);下游 LLM 能处理口语形式
         if is_first_round:
             for ent in entities:
@@ -185,12 +186,20 @@ def build_query(state: MedicalState) -> dict:
                 text = (ent.text or "").strip()
                 if not text:
                     continue
-                if ent.negation:
-                    if text not in denied_symptoms:
-                        denied_symptoms.append(text)
-                else:
-                    if text not in confirmed_symptoms:
-                        confirmed_symptoms.append(text)
+                # 已在任一已知列表里 → 不重写(各列表内部仅做幂等去重)
+                already_known = (
+                    text in confirmed_symptoms
+                    or text in denied_symptoms
+                    or text in uncertain_symptoms
+                )
+                if already_known:
+                    continue
+                if ent.certainty == "denied":
+                    denied_symptoms.append(text)
+                elif ent.certainty == "uncertain":
+                    uncertain_symptoms.append(text)
+                else:  # confirmed (default)
+                    confirmed_symptoms.append(text)
 
     # ─── Step 2: Sparse 多字段直采(确定性,无 LLM,RETRIEVAL_EVAL §2)───
     # 来源 A:state 多字段(chief_complaint + slots 单值 + slots list)
@@ -266,6 +275,7 @@ def build_query(state: MedicalState) -> dict:
     update = {
         "confirmed_symptoms": confirmed_symptoms,
         "denied_symptoms": denied_symptoms,
+        "uncertain_symptoms": uncertain_symptoms,
         "dense_query": qc.dense_query,
         # sparse_queries 由 Step 2 确定性产出,LLM 不参与(详见 QueryConstructionOutput docstring)
         "sparse_queries": sparse_queries,

@@ -13,7 +13,16 @@ class NEREntity(BaseModel):
     entity_type: Literal["symptom", "disease", "drug", "anatomy"] = Field(
         ..., description="实体类型"
     )
-    negation: bool = Field(False, description="是否为否定表述,如'不头痛'")
+    certainty: Literal["confirmed", "denied", "uncertain"] = Field(
+        "confirmed",
+        description=(
+            "确定性三态(按患者语气判):"
+            "confirmed=语气肯定提及(如'头痛');"
+            "denied=明确否认(如'没头痛'/'不痛');"
+            "uncertain=模糊/犹豫(如'可能头痛'/'好像有点痛'/'不太确定')。"
+            "下游 ②/⑤ 按此三态分别写到 state.confirmed/denied/uncertain_symptoms。"
+        ),
+    )
     temporality: Literal["current", "past", "family"] = Field(
         "current", description="时间属性:当前/既往/家族"
     )
