@@ -63,8 +63,8 @@ def format_response(state: MedicalState) -> dict:
         _logger.error("[%s] free-text LLM call failed, returning template: %s", _NODE, e)
         text = _FALLBACK_RESPONSE
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
     return {"final_response": text}

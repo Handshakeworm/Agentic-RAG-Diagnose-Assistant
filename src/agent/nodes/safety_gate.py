@@ -121,9 +121,9 @@ def _call_llm_fallback(
             ]
         )
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
 
 def safety_gate(state: MedicalState) -> dict:

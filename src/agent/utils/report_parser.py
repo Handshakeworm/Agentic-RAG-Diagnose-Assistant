@@ -111,9 +111,9 @@ def parse_reports(file_refs: list[str]) -> list[dict]:
         # 让调用方继续,而不是抛错终止整个 Agent 流程
         return []
     finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=node, schema=schema).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", node, elapsed)
 
     # 节点代码补 report_index(对应 exam_reports 下标);LLM 输出 finding 数若与 file_refs
     # 数不一致,以 LLM 输出为准截到合法范围(spec 不强制 1:1)

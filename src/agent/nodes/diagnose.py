@@ -348,9 +348,9 @@ def diagnose(state: MedicalState) -> dict:
             "last_diagnose_raw_output": str(e),
         }
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
     # 正常路径产出 — retained_unaskable 覆盖 ④ 写的粗筛版,供 ⑧a recommend_exam 消费
     return {

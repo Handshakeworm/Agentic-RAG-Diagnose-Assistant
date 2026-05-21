@@ -93,9 +93,9 @@ def generate_advice(state: MedicalState) -> dict:
         _logger.error("[%s] structured output failed: %s", _NODE, e, exc_info=True)
         raise
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
     risk_warnings = list(result.risk_warnings)
 
