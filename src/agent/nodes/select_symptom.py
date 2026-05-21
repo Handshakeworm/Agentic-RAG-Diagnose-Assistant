@@ -19,6 +19,10 @@ import logging
 import time
 
 from config.settings import settings
+from src.agent.nodes.intake_followup_ask import (
+    _attach_question_texts,
+    _build_question_text,
+)
 from src.agent.schemas.symptom_selection import SmartFollowupOutput
 from src.agent.state import MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
@@ -84,9 +88,9 @@ def _call_smart_followup(state: MedicalState) -> SmartFollowupOutput:
         # spec §9.3 中安全等级失败处理:跳过本轮追问,直接进诊断
         return SmartFollowupOutput(questions=[])
     finally:
-        _latency.labels(node=node, schema=schema).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=node, schema=schema).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", node, elapsed)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -140,9 +144,15 @@ def select_discriminative_symptom(state: MedicalState) -> dict:
     # unaskable 粗筛同样兜底截到 quota
     unaskable: list[dict] = [u.model_dump() for u in result.unaskable_symptoms]
     unaskable = unaskable[: settings.agent_limits.MAX_FOLLOWUP_QUESTIONS]
+    # ④ → ⑥ 直连(跳过 ⑤):本节点产题方负责同时拼好 followup_question 文案,
+    # ⑥ 入口零拼装直接 interrupt(state.followup_question)。空 list → 空文案,路由跳诊断。
+    if followup_questions:
+        followup_questions = _attach_question_texts(followup_questions)
+        followup_question_text = _build_question_text(followup_questions)
+    else:
+        followup_question_text = ""
     return {
         "followup_questions": followup_questions,
+        "followup_question": followup_question_text,
         "unaskable_symptoms": unaskable,
-        # 标记追问来源:⑦ 翻译完后 post_followup_router 据此决定 → ② 回检索(不 loop 回 ⑤)
-        "followup_source": "diagnostic",
     }

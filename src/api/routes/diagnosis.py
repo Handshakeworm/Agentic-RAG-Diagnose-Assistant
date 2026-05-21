@@ -62,7 +62,7 @@ _NODE_PROGRESS_TEXT: dict[str, str] = {
     "info_collect":                  "正在理解您的主诉…",
     "analyze_initial_reports":       "正在分析检查报告…",
     "intake_followup_ask":           "正在准备需要确认的细节…",
-    "generate_followup":             "正在生成追问…",
+    "generate_followup":             "正在准备要确认的内容…",  # Step A pro 决策;Step B 由 custom event 切灰字
     "process_followup_answer":       "正在解析您的回答…",
     "build_query":                   "正在构造检索查询…",
     "retrieve":                      "正在检索医学知识库…",
@@ -73,6 +73,15 @@ _NODE_PROGRESS_TEXT: dict[str, str] = {
     "safety_gate":                   "正在做安全核查…",
     "generate_advice":               "正在生成用药建议…",
     "format_response":               "正在整理回复…",
+}
+
+# 节点内 sub-step 灰字:节点用 langchain `dispatch_custom_event("progress_step", {"step": ...})`
+# 推,SSE 在 astream_events `on_custom_event` 分支接,name 必须是 "progress_step"。
+# 用途:同一节点内多步 LLM 时,把每步 LLM 开始前的灰字单独显示,而不是节点 chain_start
+# 只 fire 一次后整个节点过程都一个灰字。
+_CUSTOM_STEP_PROGRESS_TEXT: dict[str, str] = {
+    "intake_translate_answers": "正在处理回答…",  # intake 4 batch 收完后调 parse_followup_response 前
+    "step_b_question_gen":      "正在生成追问…",  # ⑤ Step A 决策完,Step B flash 拼问句前
 }
 
 
@@ -114,6 +123,18 @@ def _build_error_info(diagnosis_result: list[dict]) -> dict | None:
 def _sse(payload: dict) -> str:
     """SSE 一条消息:`data: <json>\\n\\n`(空行表示消息结束,符合 EventSource 协议)。"""
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _to_dict(v) -> dict | None:
+    """state_dict 字段在 LangGraph 反序列化后可能是 Pydantic 对象(SessionLatencyMs /
+    SessionTokenUsage 等)或 dict。统一转 dict 供 ** 解构 / JSON 序列化使用。"""
+    if v is None:
+        return None
+    if isinstance(v, dict):
+        return v
+    if hasattr(v, "model_dump"):
+        return v.model_dump()
+    return dict(v)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -181,18 +202,41 @@ async def diagnose(
             async for ev in graph_app.astream_events(
                 graph_input, config=config, version="v2"
             ):
-                if ev.get("event") != "on_chain_start":
-                    continue
-                name = ev.get("name") or ""
-                text = _NODE_PROGRESS_TEXT.get(name)
-                if text:
-                    yield _sse({"event": "progress", "node": name, "text": text})
+                ev_type = ev.get("event")
+                if ev_type == "on_chain_start":
+                    name = ev.get("name") or ""
+                    text = _NODE_PROGRESS_TEXT.get(name)
+                    if text:
+                        yield _sse({"event": "progress", "node": name, "text": text})
+                elif ev_type == "on_custom_event" and ev.get("name") == "progress_step":
+                    # 节点内 sub-step 灰字(intake 末尾翻译 / ⑤ Step B 等)
+                    step = (ev.get("data") or {}).get("step", "")
+                    text = _CUSTOM_STEP_PROGRESS_TEXT.get(step)
+                    if text:
+                        yield _sse({"event": "progress", "node": step, "text": text})
 
             invoke_latency_ms = int((time.perf_counter() - t0) * 1000)
 
-            # ─── 4. astream_events 退出 → 要么 interrupt 要么 END,看 snapshot.next ───
+            # ─── 4. astream_events 退出 → 要么 interrupt 要么 END ───
+            # **LangGraph 1.1.10 multi-interrupt 行为**:同一个节点内第 2+ 次 interrupt
+            # 暂停时,`snapshot.next` 是空 tuple,但 `snapshot.tasks[*].interrupts` 里
+            # 仍有 pending interrupt。只看 snapshot.next 会误判 graph 已结束。所以这里
+            # 优先从 pending interrupt task 取 next_node + has_pending。
             snapshot = await graph_app.aget_state(config)
-            has_pending = bool(snapshot.next)
+            pending_task = next(
+                (t for t in (snapshot.tasks or []) if getattr(t, "interrupts", None)),
+                None,
+            )
+            if pending_task is not None:
+                has_pending = True
+                next_node = pending_task.name
+            elif snapshot.next:
+                has_pending = True
+                next_node = snapshot.next[0]
+            else:
+                has_pending = False
+                next_node = ""
+
             state_dict = (
                 snapshot.values
                 if isinstance(snapshot.values, dict)
@@ -200,7 +244,6 @@ async def diagnose(
             )
 
             if has_pending:
-                next_node = snapshot.next[0] if snapshot.next else ""
                 if next_node in ("initial_ask", "intake_followup_ask"):
                     # ⓪a 节点入口 interrupt(综合 form);intake 节点内 multi-interrupt(slot batch form)
                     # 两者都把 payload 塞在 interrupt(...) 调用里(state 还没 commit)→ 从
@@ -283,11 +326,11 @@ async def diagnose(
                 llm_raw_output=s.get("last_diagnose_raw_output"),
                 final_response=s.get("final_response") or "",
                 model_name=settings.llm.MODEL_NAME,
-                token_usage=s.get("session_token_usage") or {
+                token_usage=_to_dict(s.get("session_token_usage")) or {
                     "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0
                 },
                 latency_ms={
-                    **(s.get("session_latency_ms") or {}),
+                    **(_to_dict(s.get("session_latency_ms")) or {}),
                     "total": invoke_latency_ms,
                 },
                 error_info=_build_error_info(s.get("diagnosis_result") or []),

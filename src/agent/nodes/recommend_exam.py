@@ -1,10 +1,16 @@
 """src/agent/nodes/recommend_exam.py — Agent ⑧a recommend_exam(DEV_SPEC §4.1.2 ⑧)。
 
-结构化输出:LLM 给出 `tests: list[str]`(每项一个检查名)+ `rationale`(整体说明)。
-不再像旧实现那样把整段 free text 塞进 `recommended_tests[0]` 破坏字段语义。
+**双模式**(看 `state.diagnosis_result` 是否非空切):
+- **首诊模式**(⑤ 触发,`diagnosis_result` 为空):⑤ 已经定了"该查什么"(写在
+  `unaskable_symptoms`),⑧a 透传消费 → 医生侧 description 转译成患者友好的检查清单
+- **鉴别模式**(⑩ 后 `need_exam`,`diagnosis_result` 非空):基于候选 + `retained_unaskable`
+  推针对性补漏
 
-基于诊断候选 + unaskable 体征 + 已有报告,推荐 3-5 项检查;**不静默删除已有
-报告对应项**,由 LLM 在 rationale 里说明哪些可复用。exam_round +=1。
+**不再读 `candidate_chunks`** — 医学推理已在 ⑤/⑩ 完成,⑧a 只做"医生侧 description →
+患者友好文案 + 优先级排序",prompt 短延迟低。
+
+设计目的:首诊模式让 patient 第一轮就拿到该做的全套检查,做完回传后 ⑩ 大概率
+一次诊断结案;鉴别模式仅补漏,降低 ⑩ × 2 的概率。
 
 中安全等级失败处理:抛异常终止会话(检查推荐失败说明 LLM 完全不可用)。
 """
@@ -25,24 +31,15 @@ _NODE = "recommend_exam"
 _SCHEMA = "RecommendExamOutput"
 
 
-def _candidate_chunks_preview(state: MedicalState) -> list[str]:
-    """取前 3 条 candidate chunk 的 matched_text 作为参考片段。"""
-    out: list[str] = []
-    for c in state.candidate_chunks[:3]:
-        for vh in c.get("vector_hits") or []:
-            mt = (vh.get("matched_text") or "").strip()
-            if mt:
-                out.append(mt)
-                break
-    return out
-
-
 def recommend_exam(state: MedicalState) -> dict:
+    mode = "differential" if state.diagnosis_result else "intake"
     prompt = build_recommend_exam_prompt(
-        diagnosis_results=state.diagnosis_result,
-        unaskable_symptoms=state.unaskable_symptoms,
-        candidate_chunks_preview=_candidate_chunks_preview(state),
-        existing_report_findings=state.report_findings,
+        mode=mode,
+        chief_complaint=state.chief_complaint,
+        present_illness=state.present_illness,
+        diagnosis_results=list(state.diagnosis_result),
+        unaskable_symptoms=list(state.unaskable_symptoms),
+        existing_report_findings=list(state.report_findings),
     )
 
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
@@ -53,19 +50,19 @@ def recommend_exam(state: MedicalState) -> dict:
             prompt,
             config={
                 "callbacks": [retry_observer],
-                "metadata": {"node": _NODE, "schema": _SCHEMA},
+                "metadata": {"node": _NODE, "schema": _SCHEMA, "mode": mode},
             },
         )
     except Exception as e:
         _failures.labels(
             node=_NODE, schema=_SCHEMA, exception_type=type(e).__name__
         ).inc()
-        _logger.error("[%s] structured output failed: %s", _NODE, e)
+        _logger.error("[%s] structured output failed (mode=%s): %s", _NODE, mode, e)
         raise
     finally:
-        _latency.labels(node=_NODE, schema=_SCHEMA).observe(
-            time.perf_counter() - t0
-        )
+        elapsed = time.perf_counter() - t0
+        _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
+        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
 
     # 去重保留顺序(LLM 偶尔会重复推荐;state 字段定义无重复语义)
     tests_unique: list[str] = []

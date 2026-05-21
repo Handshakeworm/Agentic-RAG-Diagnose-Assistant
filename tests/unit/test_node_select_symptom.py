@@ -123,8 +123,13 @@ def test_slot_type_missing_slot_name_dropped(mock_llm):
     update = select_discriminative_symptom(s)
     # 第一条被丢弃,剩 2 条
     assert len(update["followup_questions"]) == 2
-    assert update["followup_questions"][0] == {"type": "slot", "slot": "trigger"}
-    assert update["followup_questions"][1] == {"type": "open"}
+    # ④ → ⑥ 直连后,select_symptom 同时给每条 dict 补 question 模板文本(供前端 form 渲染),
+    # 所以校验只看 type/slot 子集,不强等式
+    assert update["followup_questions"][0]["type"] == "slot"
+    assert update["followup_questions"][0]["slot"] == "trigger"
+    assert update["followup_questions"][1]["type"] == "open"
+    # 同时验证 followup_question 文本已模板拼好(⑥ 入口零拼装)
+    assert update["followup_question"]  # 非空
 
 
 @patch("src.agent.nodes.select_symptom.get_llm")
@@ -188,8 +193,9 @@ def test_female_first_visit_force_prepend_obstetric(mock_llm):
     s = _female_state_no_obstetric()
     update = select_discriminative_symptom(s)
 
-    assert update["followup_questions"][0] == {"type": "obstetric"}
-    assert update["followup_questions"][1] == {"type": "slot", "slot": "trigger"}
+    assert update["followup_questions"][0]["type"] == "obstetric"
+    assert update["followup_questions"][1]["type"] == "slot"
+    assert update["followup_questions"][1]["slot"] == "trigger"
 
 
 @patch("src.agent.nodes.select_symptom.get_llm")
@@ -269,4 +275,4 @@ def test_obstetric_force_respects_quota(mock_llm):
 
     assert len(update["followup_questions"]) <= K
     # obstetric 必占第 1 位
-    assert update["followup_questions"][0] == {"type": "obstetric"}
+    assert update["followup_questions"][0]["type"] == "obstetric"

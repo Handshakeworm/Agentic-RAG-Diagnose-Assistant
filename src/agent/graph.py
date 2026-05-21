@@ -2,20 +2,21 @@
 
 注册 17 节点 + 3 条件边。**form 体验设计**:⓪a / ①.5 / intake / ⑥ 都有 interrupt:
 
-  START → ⓪a initial_ask(interrupt 弹 form-1: open/病史/孕期) →
+  START → ⓪a initial_ask(interrupt 弹 open/病史/孕期 form) →
   ① info_collect(LLM 同时抽主诉 + 解析 ⓪a form) →
-  ①.5 analyze_initial_reports(interrupt 弹 form-2: 报告) →
+  ①.5 analyze_initial_reports(interrupt 弹 报告 form) →
   intake_followup_ask(**multi-interrupt 收 13 维 slot batch + LLM holistic 翻译**) →
-  ⑤ generate_followup
-    ┌─[generate_followup_out_router 路由]─┐
-    │  to_wait → ⑥(interrupt 弹 form-targeted) → ⑦
+  ⑤ generate_followup(检索前 holistic gate, 单 LLM 双 list 出口)
+    ┌─[generate_followup_out_router 路由, 3 路]─┐
+    │  to_wait(askable 主观题) → ⑥(interrupt) → ⑦
     │             ┌─[post_followup_router 路由]─┐
-    │             │  loop_to_followup(source=intake) → 回 ⑤(LLM 再判 targeted)
-    │             └─ to_build_query(source=diagnostic 或 round 触顶)→ ②
-    └─ to_build_query(intake 阶段 LLM 判够了 / 无追问) → ② build_query →
+    │             │  loop_to_followup(candidate_chunks 空) → 回 ⑤
+    │             └─ to_build_query(chunks 非空 或 round 触顶)→ ②
+    │  to_recommend_exam(无 askable 但有 unaskable) → ⑧a 首诊模式 → ⑧b → ⑨ → ②
+    └─ to_build_query(都空) → ② build_query →
        ③ retrieve → ④ select_discriminative_symptom →
        ┌─[should_continue 路由]─┐
-       │  followup(④ 写 followup_source="diagnostic") → ⑤ → ⑥ → ⑦ → ②(回检索 → ④ 再判)
+       │  followup → ⑥(④ 直连, 跳过 ⑤) → ⑦ → ②(回检索 → ④ 再判)
        └─ diagnose → ⑩ diagnose →
           ┌─[diagnose_router 路由]─┐
           │  recommend_exam → ⑧a → ⑧b(interrupt) → ⑨ → ②
@@ -24,16 +25,15 @@
 注:
 - ⓪a → ① 串行直连(① 单次 LLM 同时抽主诉/HPI + 解析 ⓪a form 答案)
 - **intake_followup_ask 一次性重型节点**:节点内 multi-interrupt 收 13 维 slot batch
-  (每批 4+open),全部收完一次 LLM holistic 翻译(复用 ⑦ 的 parse_followup_response
-  helper),写 present_illness_slots / medical_history / confirmed_symptoms + 设
-  `followup_source="intake"`。**不**出 targeted 题(那归 ⑤),**不**被 loop(出了就不回)
-- **⑤ generate_followup 双职责**:
-  (a) followup_questions 已被人写(④ 鉴别诊断)→ LLM 生成口语化文案
-  (b) followup_questions 空 + source==intake → LLM 看 holistic 决定 targeted 追问
-      (复用原 intake 末尾的 _llm_targeted_phase 逻辑)
+  (每批 4+open),全部收完一次 LLM holistic 翻译,写 present_illness_slots /
+  medical_history / confirmed_symptoms。**不**出 targeted 题(那归 ⑤)
+- **⑤ generate_followup 单职责**(检索前 holistic gate):1 次 LLM 看全量 state 决定
+  要不要追问 slot 之外的关键信息;有题就拼 followup_question(节点内模板)+ 设
+  followup_questions;无题就空,路由走 ②。**⑤ 不再被 ④ 路径调用,只有 intake/⑦ 进 ⑤**
+- **④ → ⑥ 直连**:④ 出题后顺手用模板拼 followup_question,⑥ 入口零拼装
 - **⑦ 单一职责**:LLM 翻译 ⑥ 后的追问回答,清掉 followup_questions
-- **post_followup_router**(⑦ 后)2 路:source=intake → 回 ⑤ loop(让 ⑤ LLM 再判);
-  source=diagnostic → ②(④ 鉴别诊断追问完成后 ⑩ 重新走)
+- **post_followup_router**(⑦ 后)2 路:`candidate_chunks` 空(intake 后) → 回 ⑤ loop;
+  非空(④ 鉴别诊断追问完) → ② 回检索 → ④ 再判
 - 兜底:`followup_round >= MAX_FOLLOWUP_ROUNDS=8` 强制走 ② 防 LLM 死循环
 
 `build_graph()` 返回未编译的 StateGraph(便于测试时注入 checkpointer);
@@ -108,29 +108,33 @@ def build_graph() -> StateGraph:
     workflow.add_edge("build_query", "retrieve")
     workflow.add_edge("retrieve", "select_discriminative_symptom")
 
-    # 条件边:④ → 追问 / 诊断
+    # 条件边:④ → 追问 / 诊断;追问路径直连 ⑥(跳过 ⑤,④ 已自填 followup_question)
     workflow.add_conditional_edges(
         "select_discriminative_symptom",
         should_continue,
         {
-            "followup": "generate_followup",
+            "followup": "wait_followup_answer",
             "diagnose": "diagnose",
         },
     )
 
-    # ⑤ 出口:有题 → ⑥;无题(intake 阶段 LLM 判够了)→ ②
+    # ⑤ 出口(3 路, askable > unaskable > 空):
+    #   to_wait           = 有 askable 题 → ⑥ interrupt 等答
+    #   to_recommend_exam = 无 askable 但有 unaskable → ⑧a 首诊模式直接推单
+    #   to_build_query    = 都空 → 直接 ②
     workflow.add_conditional_edges(
         "generate_followup",
         generate_followup_out_router,
         {
             "to_wait": "wait_followup_answer",
+            "to_recommend_exam": "recommend_exam",
             "to_build_query": "build_query",
         },
     )
 
-    # ⑥ → ⑦ → post_followup_router 分流:
-    #   intake 阶段(followup_source=intake)→ 回 ⑤ 让 LLM 再判 targeted
-    #   diagnostic 阶段(④ 写的 source=diagnostic)→ ② 回检索 → ④ 再判
+    # ⑥ → ⑦ → post_followup_router 分流(用 candidate_chunks 当"是否已检索"信号):
+    #   chunks 空(intake 后路径) → 回 ⑤ 让 LLM 再判
+    #   chunks 非空(④ 鉴别诊断追问完, 已经过 ②③) → ② 回检索 → ④ 再判
     workflow.add_edge("wait_followup_answer", "process_followup_answer")
     workflow.add_conditional_edges(
         "process_followup_answer",

@@ -1,7 +1,8 @@
 """tests/unit/test_node_exam_loop.py — F9 检查循环单元测试。
 
-⑧a recommend_exam(结构化 RecommendExamOutput,spec §9.3)+ ⑧b wait_exam_report
-(interrupt)+ ⑨ process_exam_result(复用 parse_reports)。
+⑧a recommend_exam(2026-05-21 起**双模式**:首诊 vs 鉴别,看 diagnosis_result 是否非空切;
+不再读 candidate_chunks)+ ⑧b wait_exam_report(interrupt)+ ⑨ process_exam_result
+(复用 parse_reports)。
 """
 from __future__ import annotations
 
@@ -11,11 +12,12 @@ from src.agent.schemas.recommend_exam import RecommendExamOutput
 from src.agent.state import create_initial_state
 
 
-# ⑧a recommend_exam
+# ⑧a recommend_exam — 鉴别模式(diagnosis_result 非空, ⑩ 后 need_exam 触发)
 
 
+@patch("src.agent.nodes.recommend_exam.build_recommend_exam_prompt")
 @patch("src.agent.nodes.recommend_exam.get_llm")
-def test_recommend_exam_returns_structured_list_and_increments_round(mock_llm_factory):
+def test_recommend_exam_differential_mode_when_diagnosis_present(mock_llm_factory, mock_build):
     from src.agent.nodes.recommend_exam import recommend_exam
 
     mock_chain = (
@@ -27,6 +29,7 @@ def test_recommend_exam_returns_structured_list_and_increments_round(mock_llm_fa
         tests=["腹部超声", "胃镜", "腹部超声"],  # 重复项验证去重
         rationale="腹部超声优先,可区分胆囊炎;胃镜可确认溃疡",
     )
+    mock_build.return_value = "mocked-prompt"
 
     s = create_initial_state(patient_id="P", patient_input="x")
     s.diagnosis_result = [
@@ -36,6 +39,45 @@ def test_recommend_exam_returns_structured_list_and_increments_round(mock_llm_fa
     assert update["exam_round"] == 1
     # spec §4.1.1 字段定义:list[str] 每项一个检查名,不允许整段塞单元素
     assert update["recommended_tests"] == ["腹部超声", "胃镜"]
+    # 验证 prompt 走鉴别模式
+    assert mock_build.call_args.kwargs["mode"] == "differential"
+
+
+@patch("src.agent.nodes.recommend_exam.build_recommend_exam_prompt")
+@patch("src.agent.nodes.recommend_exam.get_llm")
+def test_recommend_exam_intake_mode_when_no_diagnosis(mock_llm_factory, mock_build):
+    """⑤ 触发的首诊模式:无 diagnosis_result,基于主诉 + ⑤ 写的 unaskable_symptoms 推首诊全套。"""
+    from src.agent.nodes.recommend_exam import recommend_exam
+
+    mock_chain = (
+        mock_llm_factory.return_value
+        .with_structured_output.return_value
+        .with_retry.return_value
+    )
+    mock_chain.invoke.return_value = RecommendExamOutput(
+        tests=["血常规", "腹部 B 超", "肝功能"],
+        rationale="腹痛首诊标准三件套",
+    )
+    mock_build.return_value = "mocked-prompt"
+
+    s = create_initial_state(patient_id="P", patient_input="腹痛 3 天")
+    s.chief_complaint = "腹痛"
+    s.present_illness = "右上腹痛 3 天,饭后加重"
+    s.diagnosis_result = []  # 空 → 首诊模式
+    s.unaskable_symptoms = [
+        {"description": "Murphy 征查体", "reason": "鉴别胆囊炎 vs 胃炎"},
+        {"description": "腹部 B 超", "reason": "排查胆石"},
+    ]
+
+    update = recommend_exam(s)
+    assert update["exam_round"] == 1
+    assert update["recommended_tests"] == ["血常规", "腹部 B 超", "肝功能"]
+    # 验证 prompt 走首诊模式 + 透传 unaskable_symptoms
+    assert mock_build.call_args.kwargs["mode"] == "intake"
+    assert mock_build.call_args.kwargs["unaskable_symptoms"] == [
+        {"description": "Murphy 征查体", "reason": "鉴别胆囊炎 vs 胃炎"},
+        {"description": "腹部 B 超", "reason": "排查胆石"},
+    ]
 
 
 @patch("src.agent.nodes.recommend_exam.get_llm")

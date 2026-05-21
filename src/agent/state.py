@@ -1,7 +1,11 @@
 """src/agent/state.py — LangGraph StateGraph 共享状态(DEV_SPEC §4.1.1 / §4.1.1a)。
 
-`MedicalState` 是 Pydantic BaseModel,37 字段分 9 段(消息 / 患者 / 术语 / 召回 /
+`MedicalState` 是 Pydantic BaseModel,35 字段分 9 段(消息 / 患者 / 召回 /
 追问 / 诊断 / 安全 / 建议 / 审计)。
+
+注:`followup_source` 字段于 2026-05-21 移除 —— ⑦ 后的路由分流改用 `candidate_chunks`
+是否非空当隐含信号("空 = intake 后没检索过, 回 ⑤ 再判;非空 = ④ 鉴别诊断追问完成,
+回 ②"),避免在 state 里加元数据字段。详见 §4.1.3.3 router 注释。
 
 **为什么 Pydantic 而非 TypedDict**:§9.2 兼容性规则全是 Pydantic Field 语法
 (checkpointer 反序列化老 state 时缺字段自动填默认值,避免 KeyError);§9.5 inner
@@ -132,10 +136,6 @@ class MedicalState(BaseModel):
     # "slot" 阶段:循环按 13 维 HPI 空槽 + open 兜底追问;
     # "done" 阶段:slot 已填满且 LLM 针对性追问已发出(或失败兜底),允许 router 放行到 ②。
     intake_phase: Literal["slot", "done"] = "slot"
-
-    # === ⑦ 后路由分流:决定 ⑤/⑥/⑦ 走完是回 ⑤(intake targeted loop)还是 ②(④ 鉴别诊断回检索) ===
-    # intake 节点末尾写 "intake";④ select_symptom 写好 followup_questions 时写 "diagnostic"
-    followup_source: Literal["intake", "diagnostic"] | None = None
 
     # === 诊断结果 ===
     diagnosis_result: list[dict] = Field(default_factory=list)

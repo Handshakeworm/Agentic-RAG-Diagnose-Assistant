@@ -73,8 +73,17 @@ def build_info_collect_prompt(
     )
     form_extraction_lines = (
         """
-4. new_symptoms:**从 ⓪a form 的 open 题答案** 抽出患者额外提到的症状(主诉之外的副症状);
-   患者顺带补充的也算。
+4. 症状三分类(从 ⓪a form open 题答案 + patient_input 自由文本里识别;**主诉本身的症状不要重复**):
+   - **confirmed_symptoms**(语气肯定):"右上腹疼"/"有点恶心"
+   - **denied_symptoms**(明确否认,原文有'没'/'不'+症状):"没吐"/"不发烧"
+   - **uncertain_symptoms**(模糊/犹豫):"可能有点头晕"/"好像偶尔会咳"
+   - 同一句"有 A 没 B" → confirmed=[A], denied=[B];"可能 C" → uncertain=[C]
+   - 患者**完全没提到**的症状任何一类都不要列(只识别明确说了的)
+   - **patient_input 自由文本里 present_illness_slots 已捕获的字段**(如 location、nature 描述)
+     **里如果含独立症状/体征属性**(放射、伴随表现、性质本身、部位扩展等),除了填进 slots,
+     **也要按语气归到三类**:
+     - 例 patient_input 含"右上腹疼,有时往后背窜" → slots.location 照写 + confirmed_symptoms 加"右上腹疼痛"、"放射至背部"
+     - **跳过 `associated_symptoms` slot 里的内容**(它本身就是症状清单,不要重复写到 confirmed_symptoms)
 5. history_fills(仅 form 含 history 题时):
    - allergies: 过敏原名,如 ["青霉素", "海鲜"]
    - medications: 在用/长期用药名,如 ["氯沙坦"]
@@ -163,7 +172,10 @@ def build_ner_prompt(text: str) -> str:
 【字段说明】
 - text:实体原文(保留患者口语,不归一)
 - entity_type:实体类型(见上)
-- negation:是否被否定。如"没有发烧" → True;"发烧" → False
+- certainty:确定性三态(按患者**语气**判,不要把"模糊"误标成"否认"):
+  - "confirmed":语气肯定提及,如"头痛"/"右上腹疼"
+  - "denied":明确否认,原文带"没"/"不"+症状,如"没头痛"/"不发烧"
+  - "uncertain":模糊/犹豫语气,如"可能头痛"/"好像有点痛"/"不太确定"
 - temporality:时间属性。current(本次/当前) / past(既往) / family(家族)
 - value:量化值,如体温 "38.5°C"、持续时间 "3天";无则 null
 
@@ -289,66 +301,9 @@ def build_smart_followup_prompt(
 
 # ────────────────────────────────────────────────────────────────────────────
 # ⑤ generate_followup
+# (旧 build_followup_question_prompt 已删 —— ⑤ 改单职责 + ④/⑤/intake 都自带
+# question_templates 模板, 不再需要 LLM 拼自然语言追问文案。详见 generate_followup.py)
 # ────────────────────────────────────────────────────────────────────────────
-
-
-def build_followup_question_prompt(
-    chief_complaint: str,
-    questions: list[dict],
-    confirmed_symptoms: list[str],
-    denied_symptoms: list[str],
-) -> str:
-    """⑤ 生成多种 type 追问问题,患者口语风格。
-
-    支持的 type:
-      - slot       : 补全 HPI 13 维空槽
-      - open       : 开放式兜底("还有别的不舒服吗")
-      - obstetric  : 首诊女性强制问妊娠/哺乳(④ / ⓪a 都可能产出)
-      - history    : 入站病史采集(过敏 / 慢病 / 长期用药,⓪a 产出)
-      - targeted   : intake_followup_ask LLM 针对性阶段产出,question 字段已是完整问句直接透传
-    """
-    items = []
-    for q in questions:
-        if q.get("type") == "slot":
-            items.append(f"  - 补全 HPI 维度:{q['slot']}")
-        elif q.get("type") == "open":
-            items.append("  - 开放式问:还有没有别的地方不舒服")
-        elif q.get("type") == "obstetric":
-            items.append("  - 妊娠/哺乳状态(必问,关系到用药安全):问患者目前是否怀孕、是否在哺乳期")
-        elif q.get("type") == "history":
-            items.append("  - 病史采集:过敏史(食物/药物)、慢性疾病、长期服用药物 — 三项请并起来一次问")
-        elif q.get("type") == "targeted":
-            # LLM 已经生成完整问句,直接当指令交给 ⑤ 自然过渡进文本
-            text = q.get("question") or q.get("text") or ""
-            if text:
-                items.append(f"  - 针对性追问(原句:{text})")
-    items_block = "\n".join(items) if items else "  (无)"
-
-    confirmed_block = "、".join(confirmed_symptoms) or "(无)"
-    denied_block = "、".join(denied_symptoms) or "(无)"
-
-    return f"""你是问诊助手。患者主诉:"{chief_complaint}"。
-已确认有的症状:{confirmed_block}
-已否认的症状:{denied_block}
-
-请把下列待追问项**自然合并成 2-3 句**患者口语化的追问。**不要列举式**,不要"问题1/问题2",
-要像聊天一样自然过渡。
-
-【待追问项】
-{items_block}
-
-输出要求:
-- 直接给问题文本,不要前缀"请问"反复出现
-- 维度补全(slot):用"是什么情况下/怎样的/最近有没有变化"等口语表达,不要直接说"诱因/性质"
-  这类医学术语
-- 开放式追问(open):自然问"除了上面说的,还有没有别的地方不舒服?" — 用于兜底捕获遗漏症状
-- 妊娠/哺乳(obstetric):用关切语气先解释"为了用药安全,需要先确认一下" + 问"您当前是否怀孕、
-  最近有没有在哺乳?";**这一问必须出现且不能省略**,否则用药环节无法兜底
-- 病史采集(history):说"为了用药安全先了解下您的基础情况" + 一次问完三件事
-  "您有没有食物/药物过敏?有没有长期吃的药?有没有高血压糖尿病这类慢性病?"(可省略举例)
-- 针对性追问(targeted):原句已经是医生口语化好的问题,可直接转用或微调,不要改变追问对象
-- 控制在 2-3 句以内
-- 涉及隐私/心理症状要用委婉表达"""
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -427,10 +382,48 @@ def build_followup_parse_prompt(
        - 多值槽 value=["(患者未明确)"]
      (不能省略不写,否则 intake 会反复重问;不能写空字符串,会被当成未填)
    - 患者**完全没涉及**的槽位(没被问也没主动说)**不要**出现在 slot_fills 里
-2. new_symptoms:患者回答里**主动提到的症状**(无论是开放式问的回答,还是顺带补充);
-   - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛"、"夜间盗汗")
-   - 若回答只涉及维度填补、未提及任何新症状,则为空列表
-   - 已确认 / 已否认 / 不确定列表中的术语**不要**重复输出{obstetric_rule}{history_rule}""" + _JSON_TAIL
+2. 症状三分类(按患者**语气**判,LLM 自己决定每个症状归哪一类):
+   - **confirmed_symptoms**(语气肯定):"右上腹疼"/"有点恶心"/"每天都拉肚子"
+   - **denied_symptoms**(明确否认,原文有'没'/'不'+症状):"没吐"/"不痛"/"没腹泻"
+   - **uncertain_symptoms**(模糊/犹豫):"可能有点头晕"/"好像偶尔会咳"/"不太确定有没有发烧"
+   - 同一句"有 A 没 B" → confirmed=[A], denied=[B];"可能 C" → uncertain=[C]
+   - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛")
+   - 已在【上下文已知】confirmed/denied/uncertain 任一列表里的术语**不要**重复输出
+   - 患者**完全没提到**的症状**任何一类都不要列**(只识别患者明确说了的)
+   - **抽取来源**:不光看 open / targeted 题答案;**slot 题答案里如果含独立症状/体征属性**
+     (放射、伴随表现、性质本身、部位扩展等),除了填进 slot_fills,**也要按语气归到三类**:
+     - 例 location 答"右上腹,有时往后背窜" → slot_fills.location 照写 + confirmed_symptoms 加"右上腹疼痛"、"放射至背部"
+     - 例 nature 答"钝痛+胀,有时绞痛" → slot_fills.nature 照写 + confirmed_symptoms 加"钝痛"、"胀痛"、"绞痛"
+     - 例 trigger 答"没明显诱因" → slot_fills.trigger="(患者未明确)" + 不抽症状(只是"未明确",不是症状信号)
+     - **跳过 `associated_symptoms` slot**:它本身就是症状清单(已在 slot_fills 里),**不要重复**写到 confirmed_symptoms,避免重叠{obstetric_rule}{history_rule}
+
+# 输出格式(严格 JSON,**字段名必须照下方模板原样,不要新造字段名,不要 markdown 代码块包裹,不要解释**)
+
+```
+{{
+  "slot_fills": {{
+    "<HPI 13 维之一的英文槽名,如 onset_time / location / aggravating>": "<单值槽 str 或多值槽 list[str]>"
+  }},
+  "confirmed_symptoms": ["<患者明确确认的症状,如 '恶心'>", "..."],
+  "denied_symptoms": ["<患者明确否认的症状,如 '呕吐'>", "..."],
+  "uncertain_symptoms": ["<患者模糊语气提及的症状,如 '头晕'>", "..."],
+  "obstetric_fills": {{
+    "is_pregnant": true,
+    "is_lactating": false
+  }},
+  "history_fills": {{
+    "allergies": ["<过敏原名>"],
+    "medications": ["<药物名>"],
+    "past_conditions": ["<既往疾病名>"]
+  }}
+}}
+```
+
+注意:
+- `obstetric_fills` 整段仅当本轮含妊娠/哺乳追问才出现,否则**整个字段省略**(不要写 null,不要写 {{}})
+- `history_fills` 整段仅当本轮含病史追问才出现,否则**整个字段省略**
+- `slot_fills` / `confirmed_symptoms` / `denied_symptoms` / `uncertain_symptoms` 这四个字段**始终出现**,无内容时写 {{}} / [] 而非省略
+"""
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -448,17 +441,24 @@ def build_targeted_followup_prompt(
     medical_history_summary: str,
     quota: int,
 ) -> str:
-    """intake_followup_ask LLM 阶段:基于已填 HPI + 病史,定还需追问什么临床细节。
+    """⑤ Step A(pro reasoner 决策)prompt:基于已填 HPI + 病史出**决策**双 list。
 
-    严格约束:**只追问,不诊断**(prompt 内三段式禁令);TargetedFollowupOutput schema
-    的 questions 字段 max_length=5(quota 兜底)。
+    - askable_targets:**英文短标签**,患者主观能告诉的靶点(如 radiation_to_back)
+      → 后续 Step B(flash)再把每个 target 转成自然中文问句
+    - unaskable_findings:患者答不上,必须查体/化验/影像才能知道的客观证据
+      → ⑧a 首诊推单(已是医生侧 description + reason,无需再加工)
+
+    严格约束:**只判该问/该查,不诊断**;**不要再问已知信息**(prompt 内显式去重要求)。
     """
     slots_block = "\n".join(f"  - {k}:{v}" for k, v in filled_slots.items()) or "  (无)"
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
     denied_block = "、".join(denied_symptoms) or "(无)"
     uncertain_block = "、".join(uncertain_symptoms) or "(无)"
 
-    return f"""你是问诊追问助手,**只负责追问临床细节,不做诊断**。
+    return f"""你是问诊 holistic gate,**只负责判"还差什么信息",绝不做诊断**。
+你的输出会按"患者能不能答"分两路:
+  - 患者主观能答的 → 出**英文短标签**(askable_targets),稍后由另一个 LLM 拼成自然问句
+  - 患者答不上,必须查体/化验/影像才能知道的 → 让用户去医院做(unaskable_findings)
 
 【当前已知】
 - 主诉:{chief_complaint}
@@ -466,7 +466,7 @@ def build_targeted_followup_prompt(
 - HPI 13 维(已填部分):
 {slots_block}
   (若某 value 为 "(患者未明确)" 或列表含此值:**已问过但患者答不上**,**不要再对该维度追问**;
-   可以围绕未问过的维度或更具体的临床细节追问)
+   但可以把它列进 unaskable_findings,让 ⑧a 推查体/检查去拿这个信息)
 - 已确认症状:{confirmed_block}
 - 已否认症状:{denied_block}
 - 不确定症状:{uncertain_block}
@@ -474,22 +474,94 @@ def build_targeted_followup_prompt(
 {medical_history_summary}
 
 【你的任务】
-看完上述信息后,判断**在进入检索之前**还需要向患者询问哪些**临床细节**(可能影响诊断推理的具体表现/体征/时序/伴随)。
-最多输出 {quota} 条追问,每条 1 个 question + 1 个 target 标签。
+判断进入检索/诊断前还差什么信息,按"患者能不能答"分两路:
+
+1. **askable_targets**(0~{quota - 1} 条):患者用语言能告诉你的主观信息**靶点**
+   - **只输出英文短标签**(snake_case),不写完整问句!
+   - 例:fever_max_temp / radiation_to_back / aggravating_after_meal /
+     associated_jaundice / similar_episode_history / pain_quality_detail
+   - 完整自然问句由下游 LLM(flash)拼,你只负责"该问哪些靶点"
+
+2. **unaskable_findings**(0~{quota} 条):患者答不上,需要查体或检查才能确定的客观证据
+   - 例:{{"description": "腹部 Murphy 征查体", "reason": "鉴别胆囊炎 vs 胃炎"}}
+   - 例:{{"description": "血常规 + 肝功能", "reason": "判断有无感染 / 肝胆受累"}}
+   - 例:{{"description": "腹部 B 超", "reason": "看胆囊壁厚度、有无结石"}}
+   - description = 医生侧语言,写"查什么"(下游 ⑧a 会转译成患者友好文案);reason = 为什么对鉴别重要
 
 【严格约束(违反即视为输出失败)】
 1. 禁止输出疾病名/诊断/可能性/probability/differential 等任何诊断性词汇
 2. 禁止做"我怀疑是 X"/"考虑 Y"/"可能性较高"的判断
-3. 只能问**具体临床表现/体征/时序**(发热温度、放射部位、加重缓解、伴随表现、过敏药物剂量等)
-4. 信息已经充分时,questions 输出空列表 [] — 不要硬凑
+3. askable 只列**主观表现**靶点(发热温度、放射部位、加重缓解、伴随表现等)
+4. unaskable 只列**客观证据**(查体/化验/影像/心电图等);**不要把"问患者有没有"放进 unaskable**
+5. 两路不要重复同一个信息(同一项要么 askable 要么 unaskable,不能两边都出)
+6. **去重铁律**:已经出现在【当前已知】任意位置的信息**绝不再问**:
+   - 已填 HPI 维度已经有值的(包括"已问过但患者答不上"的)→ 不要重复
+   - 已确认/已否认/不确定症状列表里的症状名 → 不要再问"有没有 X"
+   - 病史档案显示"已询问,无"的范畴(过敏/慢病/既往疾病)→ 不要再问该范畴
+   - 现病史自由文本已经提到的细节(如温度数值、伴随表现)→ 不要再问相同细节
+7. 信息已充分时,两个 list 都输出 [] — 不要硬凑
 
-【输出 schema】
+# 输出格式(严格 JSON,**字段名必须照下方模板原样,不要新造字段名,不要 markdown 代码块包裹,不要解释**)
+
+```
+{{
+  "askable_targets": ["<英文 snake_case 短标签>", "<...>"],
+  "unaskable_findings": [
+    {{"description": "<医生侧语言,如 '腹部 Murphy 征查体'>", "reason": "<为什么对鉴别重要,如 '鉴别胆囊炎 vs 胃炎'>"}}
+  ]
+}}
+```
+
+注意:
+- 两个字段**始终出现**,无内容时写 [] 而非省略
+- `askable_targets` 数组上限 {quota - 1} 条;`unaskable_findings` 数组上限 {quota} 条
+"""
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# ⑤ Step B(flash 拼问句)— askable_targets → 自然中文问句
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def build_question_generation_prompt(
+    chief_complaint: str,
+    present_illness: str,
+    askable_targets: list[str],
+) -> str:
+    """⑤ Step B prompt:把 Step A 出的英文短标签 list 转成患者侧自然中文问句。
+
+    用 flash(非 thinking)跑,耗时 1-3s。输出 1-1 映射:每个 target 出一条
+    {question, target},target 必须原样回填(便于审计追踪)。
+    """
+    targets_block = "\n".join(f"  - {t}" for t in askable_targets)
+    return f"""你是问诊文案助手,把医生侧的靶点短标签转成患者能听懂的中文问句。
+
+【上下文】
+- 主诉:{chief_complaint}
+- 现病史:{present_illness}
+
+【要转换的靶点列表(英文 snake_case)】
+{targets_block}
+
+【转换规则】
+1. 每个 target 转成 **1 条 question + target 原样回填**
+2. question 是**自然中文口语**问句,患者能听懂,可以串联同主题的小问
+   - 例 fever_max_temp → "您发烧最高到多少度?有没有寒战?"
+   - 例 radiation_to_back → "疼痛会不会放射到背部?哪一侧?"
+   - 例 associated_jaundice → "您有没有注意到皮肤或眼睛发黄?"
+3. **不要诊断、不要给疾病名**,只问表现
+4. 顺序与输入顺序保持一致;target 字段**原样**回填输入的英文短标签
+
+# 输出格式(严格 JSON,**字段名必须照下方模板原样,不要 markdown 代码块包裹,不要解释**)
+
+```
 {{
   "questions": [
-    {{"question": "<完整自然语言问句>", "target": "<英文短标签,如 fever / radiation / duration>"}},
-    ...
+    {{"question": "<患者侧自然中文问句>", "target": "<原样回填输入的英文短标签>"}}
   ]
-}}""" + _JSON_TAIL
+}}
+```
+"""
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -498,62 +570,86 @@ def build_targeted_followup_prompt(
 
 
 def build_recommend_exam_prompt(
+    *,
+    mode: str,
+    chief_complaint: str,
+    present_illness: str,
     diagnosis_results: list[dict],
     unaskable_symptoms: list[dict],
-    candidate_chunks_preview: list[str],
     existing_report_findings: list[dict],
 ) -> str:
-    """⑧a recommend_exam(自由文本):基于诊断结果 + 不可问体征推断需要的检查。
+    """⑧a recommend_exam — **双模式**:
 
-    `unaskable_symptoms` 是 ⑩ 精筛过的版本(`{description, reason}` 结构),
-    可直接据 description 拟检查建议。
+    - mode="intake":⑤ 触发,无 diagnosis_result。基于主诉/HPI + `unaskable_symptoms`
+      推首诊全套(让患者一次性查齐,⑩ 大概率一次结案)
+    - mode="differential":⑩ 后 need_exam,有 diagnosis_result + 精筛的 retained_unaskable。
+      基于候选疾病推针对性补漏
+
+    **不再读 candidate_chunks** — 医学推理已在 ⑤/⑩ 完成,⑧a 只做"医生侧 description →
+    患者友好文案 + 优先级排序",prompt 短延迟低。
+
+    `unaskable_symptoms` 在两种模式下都是主源:首诊模式来自 ⑤,鉴别模式来自 ⑩ 精筛覆盖。
     """
-    diag_lines = [
-        f"  - {r.get('disease')} (p={r.get('probability', 0):.2f}, type={r.get('differentiation_type')})"
-        for r in diagnosis_results[:5]
-    ]
-    diag_block = "\n".join(diag_lines) or "  (无诊断结果)"
-
     unaskable_lines = [
         f"  - {u.get('description')} —— {u.get('reason')}"
         for u in unaskable_symptoms[:8]
     ]
     unaskable_block = "\n".join(unaskable_lines) or "  (无)"
 
-    chunks_preview = "\n".join(f"  - {c[:80]}" for c in candidate_chunks_preview[:3]) or "  (无)"
-
     existing_lines = []
     for r in existing_report_findings[:5]:
         existing_lines.append(
             f"  - {r.get('report_type')} ({r.get('report_date')}): "
-            f"impressions={r.get('impressions')[:2]}"
+            f"impressions={(r.get('impressions') or [])[:2]}"
         )
     existing_block = "\n".join(existing_lines) or "  (无)"
 
-    return f"""你是医生检查建议助手。请基于诊断候选 + 鉴别要点,推荐 3-5 项检查,按优先级排序,
-**不要静默删除已有报告对应的检查**——对已有报告的项,额外加复用评估说明。
+    if mode == "intake":
+        # 首诊模式:无诊断假设,基于主诉 + HPI + ⑤ 写的 unaskable 推全套
+        context_block = f"""【模式】首诊模式 — 患者尚未诊断,需推荐"为鉴别清楚最可能的几类病所需的标准首查清单"
+
+【患者主诉 + 现病史】
+- 主诉:{chief_complaint}
+- 现病史:{present_illness}
+
+【⑤ holistic gate 标记的不可问发现(主源,直接转检查清单)】
+{unaskable_block}"""
+        task_block = """【任务】
+基于主诉 + ⑤ 已标记的 unaskable 清单,推荐 3-5 项检查/查体(按优先级)。
+**直接消费 unaskable_findings 的 description**(它已经写好"该查什么")作为主要候选;
+如有遗漏的常规鉴别检查(常见主诉的标准首查),酌情补充 1-2 项。"""
+    else:
+        # 鉴别模式:有候选疾病,基于 retained_unaskable 推补漏
+        diag_lines = [
+            f"  - {r.get('disease')} (p={r.get('probability', 0):.2f}, type={r.get('differentiation_type')})"
+            for r in diagnosis_results[:5]
+        ]
+        diag_block = "\n".join(diag_lines) or "  (无诊断结果)"
+        context_block = f"""【模式】鉴别模式 — ⑩ 已诊断但仍需检查补漏,基于候选疾病推针对性鉴别
 
 【诊断候选】
 {diag_block}
 
-【需检查鉴别的体征(unaskable)】
-{unaskable_block}
+【⑩ 精筛的需鉴别体征(retained_unaskable)】
+{unaskable_block}"""
+        task_block = """【任务】
+基于候选疾病的鉴别要点 + retained_unaskable,推荐 3-5 项检查(按优先级),
+每项说明"区分什么"。"""
 
-【相关文献片段(供参考)】
-{chunks_preview}
+    return f"""你是医生检查建议助手。请按下方模式 + 上下文,推荐检查项给患者。
+
+{context_block}
 
 【患者已有报告】
 {existing_block}
 
-【输出格式】
-按优先级编号列出检查,每项 1-2 句说明:
-1. 检查名(优先级原因)
-2. ...
+{task_block}
 
-对与已有报告交集的检查,在该项里追加"已有[日期]报告,可携带评估是否需要复做"
-之类的复用说明,不要直接删掉。
-
-口吻面向患者,避免医学术语堆砌,涉及禁食/造影剂等特殊条件要写明。""" + _JSON_TAIL
+【输出要求】
+- 按优先级编号列出,每项 1-2 句说明
+- 对与已有报告交集的检查,追加"已有[日期]报告,可携带评估是否需要复做"复用说明,不要静默删除
+- 口吻面向患者,避免医学术语堆砌,涉及禁食/造影剂等特殊条件要写明
+- 输出 `tests: list[str]`(每项一条完整检查名 + 简短说明)+ `rationale: str`(整体说明)""" + _JSON_TAIL
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -801,7 +897,7 @@ def build_diagnose_prompt(
 【检查报告发现】
 {reports_block}
 
-【④ 写入的 unaskable 粗筛(LLM 想知道但患者答不上的体征,供 retained_unaskable 精筛参考)】
+【上游写入的 unaskable 粗筛(④ 鉴别诊断 + ⑤ 检索前 holistic 累积,供 retained_unaskable 精筛参考)】
 {unaskable_block}
 
 【医学文献文本(RAG 召回 Top-{len(parent_texts)} 父块 + table HTML,按相关性顺序)】
@@ -823,11 +919,13 @@ def build_diagnose_prompt(
      * **top1 决定后续路由**:`need_exam` → 走 ⑧ recommend_exam;其他 → 走 ⑪ safety_gate;
        top2/top3 沿用 top1 的值即可(router 只看 top1)
    - failure_reason:**保持 null**(由节点代码在兜底路径填,不在 LLM 职责范围)
-3. retained_unaskable(基于诊断结果挑/改写,从【④ 写入的 unaskable 粗筛】里精筛):
+3. retained_unaskable(主要从【上游 unaskable 粗筛】里精筛 + 改写,**也允许新产**):
    - top1=`confirmed` → 通常返空列表(证据已闭环,无需再查)
    - top1=`insufficient` → 通常返空列表(检查也救不回信息不足)
    - top1=`need_exam` → **至少保留 1 条**,只留对当前 top 候选鉴别真正关键的;描述可改写
      得更聚焦,如把"想知道胆囊有无问题"改成"腹部 B 超确认胆囊壁厚度 + 有无结石"
+   - **允许新产**:诊断推理后觉得"上游没列但鉴别真需要"的检查项(如 MRCP / 特定肿瘤标志物等),
+     可以直接加进 retained_unaskable;但**不要为加而加** — 大多数 case 挑/改写就够
    - **宁可少留不可多留** — 不该查的留下来会被 ⑧a 直接推给患者""" + _JSON_TAIL
 
     # 多模态消息组装:base text + 每张可加载的 figure 截图作 image_url 块

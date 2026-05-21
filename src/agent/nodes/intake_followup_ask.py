@@ -10,7 +10,8 @@
 - 全部 batch 收完 → **一次 LLM holistic 翻译**累积的所有 batch answer(复用 ⑦ 的
   `parse_followup_response` helper),把 slot 原文写回 state.present_illness_slots,
   顺带 merge history/obstetric 进 medical_history,append new_symptoms 进 confirmed_symptoms
-- 设 `followup_source="intake"`,出口 → ⑤(由 ⑤ LLM 看 holistic 决定要不要 targeted 追问)
+- 出口固定 → ⑤(由 ⑤ LLM 看 holistic 决定要不要 targeted 追问)。⑦ 后的路由分流不靠
+  source 字段,而是看 `candidate_chunks` 是否非空(空 = intake 后还没检索过)。
 
 **约束**:
 - 节点只跑一次,不被 loop
@@ -24,6 +25,7 @@ resume value,所以局部变量(accumulated_q/answers/etc.)每次重跑时重新
 """
 from __future__ import annotations
 
+from langchain_core.callbacks import dispatch_custom_event
 from langgraph.types import interrupt
 
 from src.agent.nodes.process_followup import parse_followup_response
@@ -53,7 +55,7 @@ _SLOT_QUESTION_TEMPLATES: dict[str, str] = {
 _TYPE_TEMPLATES: dict[str, str] = {
     "open":      "您还有没有别的地方不舒服?有就一起说,我好综合判断。",
     "history":   "为了用药安全,简单了解一下您的基础情况:有没有食物或药物过敏?有长期服用的药物吗?有高血压、糖尿病这类慢性病吗?(如果没有,直接答'无'即可)",
-    "obstetric": "为了用药安全,需要确认一下:您当前是否怀孕?是否在哺乳期?(如果不适用直接答'无')",
+    "obstetric": "为了用药安全,需要确认一下:您当前是否怀孕?是否在哺乳期?",
 }
 
 
@@ -120,6 +122,9 @@ def intake_followup_ask(state: MedicalState) -> dict:
         accumulated_texts.append(batch_text)
 
     # 全部 batch 收完 → 一次 LLM holistic 翻译(复用 ⑦ 的 parse 逻辑)
+    # 推 custom event,把灰字从"正在准备需要确认的细节…"切到"正在处理回答…"
+    # (节点 chain_start 只在 batch 收集阶段 fire 一次,要靠 custom event 加段)
+    dispatch_custom_event("progress_step", {"step": "intake_translate_answers"})
     all_question = "\n\n".join(accumulated_texts)
     all_answer = "\n\n".join(accumulated_answers)
     update = parse_followup_response(
@@ -128,7 +133,4 @@ def intake_followup_ask(state: MedicalState) -> dict:
         questions=accumulated_questions,
         state=state,
     )
-    # 标记追问来源,⑦ 后的 post_followup_router 据此决定:回 ⑤(intake targeted loop)
-    # 或 → ②(④ 鉴别诊断追问完成后回检索)
-    update["followup_source"] = "intake"
     return update

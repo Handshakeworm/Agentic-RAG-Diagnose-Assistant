@@ -16,7 +16,11 @@ import pytest
 
 
 def test_create_initial_state_returns_all_35_fields() -> None:
-    """§4.1.1 字段清单完整性 — 35 个字段一个不能少(intake_phase 加入)。"""
+    """§4.1.1 字段清单完整性 — 35 个字段一个不能少。
+
+    2026-05-21 followup_source 字段移除(⑦ 后路由分流改用 candidate_chunks 隐含信号,
+    避免在 state 里加元数据字段);36 → 35。
+    """
     from src.agent.state import MedicalState, create_initial_state
 
     state = create_initial_state(patient_id="P001", patient_input="头疼一周")
@@ -31,11 +35,12 @@ def test_create_initial_state_returns_all_35_fields() -> None:
         # 召回与候选(extracted_symptoms 随 ④ 节点废弃一并移除;standardized_entities 随 EL 移除)
         "dense_query", "sparse_queries", "candidate_chunks",
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
-        # 追问控制(info_gain 随信息增益机制移除一并删除;intake_phase 新增)
+        # 追问控制(info_gain 随信息增益机制移除一并删除;intake_phase 保留;
+        # followup_source 已于 2026-05-21 移除)
         "followup_round", "last_nlu_round", "followup_question", "followup_answer",
         "followup_questions", "unaskable_symptoms",
         "exam_round", "pending_exam_results",
-        "intake_phase", "followup_source",
+        "intake_phase",
         # 诊断
         "diagnosis_result",
         # 安全约束
@@ -51,7 +56,7 @@ def test_create_initial_state_returns_all_35_fields() -> None:
     extra = actual_fields - expected_fields
     assert not missing, f"缺失字段: {missing}"
     assert not extra, f"多余字段: {extra}"
-    assert len(actual_fields) == 36
+    assert len(actual_fields) == 35
 
 
 def test_caller_required_fields_passed_through() -> None:
