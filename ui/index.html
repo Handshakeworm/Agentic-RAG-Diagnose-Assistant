@@ -266,8 +266,8 @@
       </div>
     </div>
 
-    <!-- 诊断结果卡片(completed 状态) -->
-    <div x-show="diagnosis" class="space-y-4 fade-in">
+    <!-- 诊断结果卡片(completed 状态) / 推荐检查清单(ongoing_exam 中态) -->
+    <div x-show="diagnosis || (recommendedTests && recommendedTests.length)" class="space-y-4 fade-in">
       <!-- 诊断疾病列表 -->
       <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
@@ -357,7 +357,8 @@
   </div>
 
   <!-- ────── 底部输入区 ────── -->
-  <div x-show="!diagnosis && !recommendedTests" class="fixed bottom-0 inset-x-0 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent pt-6 pb-4 px-4">
+  <!-- ongoing_exam(recommendedTests 非空)时也要显示,患者要在这里上传报告;只有 completed(diagnosis 有值)才彻底隐藏 -->
+  <div x-show="!diagnosis" class="fixed bottom-0 inset-x-0 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent pt-6 pb-4 px-4">
     <div class="max-w-3xl mx-auto space-y-2">
       <!-- 已"上传"文件预览(模拟) -->
       <div x-show="uploadedFiles.length" class="flex flex-wrap gap-2">
@@ -569,7 +570,7 @@ function app() {
       if (q.type === 'obstetric')     return '妊娠/哺乳';
       if (q.type === 'history')       return '病史(过敏/慢病/用药)';
       if (q.type === 'open')          return '其他症状';
-      if (q.type === 'targeted')      return q.target || '针对性追问';
+      if (q.type === 'targeted')      return q.question || q.target || '针对性追问';
       if (q.type === 'report_upload') return '检查报告上传';
       if (q.type === 'slot') {
         const m = {

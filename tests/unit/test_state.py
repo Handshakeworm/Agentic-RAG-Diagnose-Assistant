@@ -85,11 +85,14 @@ def test_present_illness_slots_13_dimensions_strongly_typed() -> None:
     slots = create_initial_state(patient_id="P001", patient_input="x").present_illness_slots
     assert isinstance(slots, PresentIllnessSlots)
 
-    multi_value = {"aggravating", "relieving", "associated_symptoms"}
+    # 2026-05-22:trigger/nature/severity 从单值改 list[str](解决多值覆盖)
+    multi_value = {
+        "aggravating", "relieving", "associated_symptoms",
+        "trigger", "nature", "severity",
+    }
     single_value = {
-        "onset_time", "onset_mode", "trigger", "location", "nature",
-        "severity", "duration_pattern", "progression",
-        "treatment_tried", "treatment_response",
+        "onset_time", "onset_mode", "location", "duration_pattern",
+        "progression", "treatment_tried", "treatment_response",
     }
     assert set(PresentIllnessSlots.model_fields.keys()) == multi_value | single_value
     assert len(PresentIllnessSlots.model_fields) == 13

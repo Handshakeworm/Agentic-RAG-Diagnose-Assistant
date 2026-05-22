@@ -122,30 +122,47 @@
 
 ### Step 4 — ⑤ generate_followup(关键观察点)
 
-**预期灰字**:
+⑤ 架构:**Step A(flash holistic 决策)→ Step B(flash 拼问句)**,产 askable + unaskable 两路。
+实测**典型走 2 轮 askable**(每轮 4 targeted + 1 open),把鉴别要点问够才转 ⑧a。
+
+**预期灰字(每轮都会出)**:
 ```
+正在准备需要确认的细节…
 正在生成追问…
 ```
 
-⑤ 一次 LLM 看 holistic state,产 askable + unaskable 两路。**两种可能分支**:
+#### 第 1 轮 ⑤ — 鉴别要点(发热量化 + 黄疸 + 既往 + 家族史)
 
-**分支 A — 出 askable 题**(可能性:中)
-- 弹一批 targeted form(纯文字题),比如:
-  - 疼痛有没有放射到肩背?
-  - 大小便颜色有变化吗(尿色、大便色)?
-  - 之前有没有类似发作?
-  - 您还有没有别的地方不舒服?
+`askable_targets` 通常包含:`fever_max_temp` / `jaundice_eyes_skin` / `similar_episode_history` / `family_gallstones`。
+对应问句(Step B 拼出来):
 
-  **输入示例**:疼会窜到右后背 / 没注意大小便 / 第一次发 / 没了
+| 题 | 你输入 |
+|---|---|
+| 您发烧最高到多少度?有没有打寒战? | 38 度,没有寒战 |
+| 您右上腹疼痛时,有没有注意到眼睛或皮肤发黄? | 无 |
+| 您以前有没有过类似的右上腹疼痛? | 无 |
+| 您的直系亲属(父母、兄弟姐妹)有没有人得过胆结石? | 无 |
+| open:您还有没有别的地方不舒服? | 无 |
 
-  → 答完进 ⑦ → 回 ⑤(因为 `candidate_chunks` 还空)
+提交 → ⑦ 解析合并 → ② → ③ → ④ → ⑤ 第 2 轮。
 
-  → 这次 ⑤ 应该判:askable 没新的,unaskable 应该有(Murphy / B 超 / 血常规)→ 直接走 ⑧a
+#### 第 2 轮 ⑤ — 梗阻黄疸排除 + 胆囊典型放射 + 疼痛量化
 
-**分支 B — 直接出 unaskable**(可能性:高,因为 intake 已经收得很全)
-- ⑤ 觉得主观信息够,直接走 ⑧a 推单(跳过 ⑥)
+`askable_targets` 通常包含:`stool_color` / `urine_color` / `radiation_to_right_shoulder` / `pain_score_numeric`。
 
-✅ 验证点 3:**不论分支 A 还是 B,最终必须进 ⑧a 首诊模式**(因为 13 维 slot + 主诉显然不足以诊断,Murphy / 血常规 / B 超必须查)
+| 题 | 你输入 | 临床用意 |
+|---|---|---|
+| 您有注意大便颜色变浅或发白吗? | 无 | 排除胆总管完全梗阻 |
+| 您有没有发现小便颜色变深,像浓茶一样? | 无 | 同上 |
+| 您的右上腹疼痛会不会放射到右肩? | 有,会窜到右肩 | 胆囊典型放射(Murphy 区),强阳性 |
+| 如果用 0-10 分打分,您现在大概几分? | 7 | 重度,和"影响睡眠 + 布洛芬无效"一致 |
+| open | 无 | — |
+
+提交 → ⑦ → ② → ⑤ 第 3 次。这一次 askable 应该已空(信息够了),`unaskable_findings` 仍有(Murphy / 血常规 / B 超)→ 走 ⑧a。
+
+✅ 验证点 3:**双轮 askable 后,第 3 次 ⑤ 必须转 ⑧a 首诊模式**(askable=[] + unaskable 非空)
+
+> 注:`askable_targets` 是 Step A 看 holistic state 即时决策,**实际题面可能略有不同**(比如把发烧 + 寒战分两题,或加 "Murphy 自我按压痛")。按"同症状方向"答即可,不必逐字对齐。
 
 ---
 

@@ -144,7 +144,7 @@ def test_sparse_multifield_picks_up_slots_and_report(mock_llm_factory):
 
     s = create_initial_state(patient_id="P", patient_input="x")
     s.chief_complaint = "腹痛 3 天"
-    s.present_illness_slots.trigger = "进食后"
+    s.present_illness_slots.trigger = ["进食后"]  # 2026-05-22:trigger 改 list[str]
     s.present_illness_slots.location = "右上腹"
     s.present_illness_slots.aggravating = ["油腻饮食"]
     s.report_findings = [

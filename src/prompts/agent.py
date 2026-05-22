@@ -39,6 +39,17 @@ from langchain_core.messages import BaseMessage, HumanMessage
 _JSON_TAIL = "\n\n请严格按 JSON 格式输出,所有字段值与上述 schema 描述一致。"
 
 
+def _format_slot_value(v) -> str:
+    """slot 值渲染到 prompt 文本:list[str] 用顿号串,str 直接返回,None/空返空串。
+
+    2026-05-22 多值槽扩到 6 个后,prompt 拼 `f"{k}: {v}"` 直接显示 Python repr
+    (`['进食', '熬夜']`),不漂亮也降低 LLM 可读性。统一在这里转成自然语言。
+    """
+    if isinstance(v, list):
+        return "、".join(str(x) for x in v if x)
+    return str(v) if v is not None else ""
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # ① info_collect Step 1
 # ────────────────────────────────────────────────────────────────────────────
@@ -110,10 +121,11 @@ def build_info_collect_prompt(
    (部位/性质/程度)、伴随症状、加重/缓解因素、治疗经过 —— **主要来源 patient_input**
 3. present_illness_slots(13 维结构化槽位)—— **主要来源 patient_input**,form 答案附带的细节
    也可填入:
-   - 单值槽(str | None):onset_time / onset_mode / trigger / location / nature /
-     severity / duration_pattern / progression / treatment_tried / treatment_response
+   - 单值槽(str | None):onset_time / onset_mode / location / duration_pattern /
+     progression / treatment_tried / treatment_response
    - 多值槽(list[str]):aggravating(加重因素) / relieving(缓解因素) /
-     associated_symptoms(伴随症状)
+     associated_symptoms(伴随症状) / trigger(诱因,可叠加) / nature(性质,可多) /
+     severity(程度,主观描述 + NRS 评分可叠加)
    - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**{form_extraction_lines}
 
 注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。""" + _JSON_TAIL
@@ -195,7 +207,7 @@ def build_query_construction_prompt(
     Sparse 路词袋由 Step 2 state 多字段直采(chief + slots + report findings)确定性
     产出,完全不进 LLM 视野;LLM 只负责整合证据成一句语义连贯的 dense 查询。
     """
-    slots_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
+    slots_lines = [f"  - {k}: {_format_slot_value(v)}" for k, v in filled_slots.items() if v]
     slots_block = "\n".join(slots_lines) if slots_lines else "  (无)"
 
     pos_block = "; ".join(report_positive) or "(无)"
@@ -245,7 +257,7 @@ def build_smart_followup_prompt(
     quota: int,
 ) -> str:
     """④ 1 次 LLM 同时出 questions(追问) + unaskable_symptoms(粗筛)。"""
-    filled_lines = [f"  - {k}: {v}" for k, v in filled_slots.items() if v]
+    filled_lines = [f"  - {k}: {_format_slot_value(v)}" for k, v in filled_slots.items() if v]
     filled_block = "\n".join(filled_lines) if filled_lines else "  (无,全部空缺)"
     empty_block = ", ".join(empty_slots) or "(无,13 维已全部填满)"
     conf_block = "、".join(confirmed_symptoms) or "(无)"
@@ -372,10 +384,17 @@ def build_followup_parse_prompt(
 
 【解析规则】
 1. 维度级回填(slot_fills,key=槽位名):
-   - 单值槽(onset_time/onset_mode/trigger/location/nature/severity/
-     duration_pattern/progression/treatment_tried/treatment_response):value=str
-   - 多值槽(aggravating/relieving/associated_symptoms):value=list[str]
+   - 单值槽(onset_time/onset_mode/location/duration_pattern/progression/
+     treatment_tried/treatment_response):value=str
+   - 多值槽(trigger/nature/severity/aggravating/relieving/associated_symptoms):value=list[str]
    - 槽位名必须是 HPI 13 维之一,不要新造槽名
+   - **severity 槽特殊规则**:只填**主观严重度描述**(轻/中/重 / 影响睡眠/吃饭/活动 /
+     0-10 NRS 评分)。**绝对不要填客观生命体征数值或化验值**(温度、血压、脉搏、SpO2、
+     血糖、WBC 等)— 这些数值应写到 associated_symptoms 多值槽里。
+       - ✅ severity=["影响睡眠", "7-8 分"] / severity=["重度"]
+       - ❌ severity=["38℃"]   → 应是 associated_symptoms 加 "发热 38℃"
+       - ❌ severity=["150/95"] → 应是 associated_symptoms 加 "BP 升高 150/95"
+       - ❌ severity=["WBC 12.5"] → 化验值不进 slot,等 ⑨ 解析报告
    - **本轮被询问到的 slot,患者明确答"不知道/不清楚/没注意/没有/无"等**否定或不知:
      在 slot_fills 中写入哨兵值标记"已问无答",避免下游循环重问:
        - 单值槽 value="(患者未明确)"
@@ -384,7 +403,19 @@ def build_followup_parse_prompt(
    - 患者**完全没涉及**的槽位(没被问也没主动说)**不要**出现在 slot_fills 里
 2. 症状三分类(按患者**语气**判,LLM 自己决定每个症状归哪一类):
    - **confirmed_symptoms**(语气肯定):"右上腹疼"/"有点恶心"/"每天都拉肚子"
-   - **denied_symptoms**(明确否认,原文有'没'/'不'+症状):"没吐"/"不痛"/"没腹泻"
+   - **denied_symptoms**(明确否认):
+     a. 原文有'没'/'不'+症状:"没吐"/"不痛"/"没腹泻"
+     b. **回答只有'无'/'没有'/'没'/'第一次'/'从未'/'否'等单纯否认词时**,
+        **必看【追问问题】对应那一条**,从 question 里抽出靶点症状写到 denied:
+        - 例 Q="您有没有便血?" + A="没有" → denied 加 "便血"
+        - 例 Q="您以前有过类似的右上腹疼痛吗?" + A="第一次" → denied 加 "既往类似腹痛"
+        - 例 Q="您有没有打寒战?" + A="没有" → denied 加 "寒战"
+        - 例 Q="皮肤或眼睛发黄?" + A="无" → denied 加 "皮肤黄染" 和 "巩膜黄染"
+        - 关键:answer 没症状名 → 从 question 提靶点,**不要因为 answer 文本里没症状就漏识别**
+     c. **特别例外:type=open 的"还有没有别的不舒服"题**(对应 items_block 里
+        "开放式问『还有别的不舒服』"那一条),答"无/没了/没有/没什么"等**只代表
+        无新症状补充**,**不要**写到 denied(像 "其他不适"/"其他症状" 这种泛化词
+        不是临床症状名,写进 denied 会污染下游决策)
    - **uncertain_symptoms**(模糊/犹豫):"可能有点头晕"/"好像偶尔会咳"/"不太确定有没有发烧"
    - 同一句"有 A 没 B" → confirmed=[A], denied=[B];"可能 C" → uncertain=[C]
    - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛")
@@ -393,8 +424,9 @@ def build_followup_parse_prompt(
    - **抽取来源**:不光看 open / targeted 题答案;**slot 题答案里如果含独立症状/体征属性**
      (放射、伴随表现、性质本身、部位扩展等),除了填进 slot_fills,**也要按语气归到三类**:
      - 例 location 答"右上腹,有时往后背窜" → slot_fills.location 照写 + confirmed_symptoms 加"右上腹疼痛"、"放射至背部"
-     - 例 nature 答"钝痛+胀,有时绞痛" → slot_fills.nature 照写 + confirmed_symptoms 加"钝痛"、"胀痛"、"绞痛"
-     - 例 trigger 答"没明显诱因" → slot_fills.trigger="(患者未明确)" + 不抽症状(只是"未明确",不是症状信号)
+     - 例 nature 答"钝痛+胀,有时绞痛" → slot_fills.nature=["钝痛","胀痛","绞痛"](多值 list) + confirmed_symptoms 加"钝痛"、"胀痛"、"绞痛"
+     - 例 trigger 答"既吃了红烧肉,又熬夜" → slot_fills.trigger=["进食油腻","熬夜"](多值 list) + 不抽症状(诱因不是症状)
+     - 例 trigger 答"没明显诱因" → slot_fills.trigger=["(患者未明确)"] + 不抽症状(只是"未明确",不是症状信号)
      - **跳过 `associated_symptoms` slot**:它本身就是症状清单(已在 slot_fills 里),**不要重复**写到 confirmed_symptoms,避免重叠{obstetric_rule}{history_rule}
 
 # 输出格式(严格 JSON,**字段名必须照下方模板原样,不要新造字段名,不要 markdown 代码块包裹,不要解释**)
@@ -450,7 +482,7 @@ def build_targeted_followup_prompt(
 
     严格约束:**只判该问/该查,不诊断**;**不要再问已知信息**(prompt 内显式去重要求)。
     """
-    slots_block = "\n".join(f"  - {k}:{v}" for k, v in filled_slots.items()) or "  (无)"
+    slots_block = "\n".join(f"  - {k}:{_format_slot_value(v)}" for k, v in filled_slots.items()) or "  (无)"
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
     denied_block = "、".join(denied_symptoms) or "(无)"
     uncertain_block = "、".join(uncertain_symptoms) or "(无)"
@@ -549,8 +581,18 @@ def build_question_generation_prompt(
    - 例 fever_max_temp → "您发烧最高到多少度?有没有寒战?"
    - 例 radiation_to_back → "疼痛会不会放射到背部?哪一侧?"
    - 例 associated_jaundice → "您有没有注意到皮肤或眼睛发黄?"
-3. **不要诊断、不要给疾病名**,只问表现
-4. 顺序与输入顺序保持一致;target 字段**原样**回填输入的英文短标签
+3. **严禁泛化代词**(如"类似情况"/"相同症状"/"这种问题"/"上面那个"等),
+   必须把**主诉的具体症状名嵌入问句**,让下游(⑦ flash 解析)和患者都能明确知道指什么:
+   - 例 similar_episode_history + 主诉"右上腹疼痛" → "您**以前有没有过类似的右上腹疼痛**?"
+     **不**写 "您以前有过类似情况吗?"
+   - 例 fever_chills + 主诉"腹痛伴发热" → "您发烧时**有没有打寒战**?"
+     **不**写 "您发烧时有没有别的症状?"
+   - 例 worsening_pattern + 主诉"上腹痛" → "您的**上腹痛**是越来越重还是越来越轻?"
+     **不**写 "症状有变化吗?"
+   - **关键**:把主诉/现病史里出现过的症状词(如"右上腹疼痛""发热""恶心")**原样嵌进 question**,
+     这样患者一眼看懂问的是什么,⑦ 解析时也能从 question 抽出靶点症状
+4. **不要诊断、不要给疾病名**,只问表现
+5. 顺序与输入顺序保持一致;target 字段**原样**回填输入的英文短标签
 
 # 输出格式(严格 JSON,**字段名必须照下方模板原样,不要 markdown 代码块包裹,不要解释**)
 

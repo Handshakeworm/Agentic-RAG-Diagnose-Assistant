@@ -31,10 +31,10 @@ def test_full_input_fills_all_slots(mock_llm_factory):
     schema_slots = SchemaSlots(
         onset_time="3天前",
         onset_mode="急性",
-        trigger="进食后",
+        trigger=["进食后"],
         location="上腹",
-        nature="胀痛",
-        severity="中",
+        nature=["胀痛"],
+        severity=["中"],
         duration_pattern="持续性",
         aggravating=["进食", "饥饿"],
         relieving=["热敷"],
@@ -87,7 +87,7 @@ def test_short_input_leaves_slots_empty(mock_llm_factory):
     slots = update["present_illness_slots"]
     assert slots.location == "头部"
     assert slots.onset_time is None
-    assert slots.trigger is None
+    assert slots.trigger == []  # 2026-05-22:多值槽默认空 list
     assert slots.aggravating == []
     assert slots.associated_symptoms == []
 

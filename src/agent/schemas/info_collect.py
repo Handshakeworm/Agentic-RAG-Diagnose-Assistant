@@ -20,10 +20,10 @@ class PresentIllnessSlots(BaseModel):
 
     onset_time:          str | None = Field(None, description="起病时间,如'3天前'")
     onset_mode:          str | None = Field(None, description="起病方式:急性/缓慢/隐匿")
-    trigger:             str | None = Field(None, description="诱因:劳累/受凉/进食/无明显诱因")
+    trigger:             list[str] = Field(default_factory=list, description="诱因(多值):劳累/受凉/进食/熬夜等可叠加")
     location:            str | None = Field(None, description="部位")
-    nature:              str | None = Field(None, description="性质:刺痛/胀痛/绞痛/烧灼感")
-    severity:            str | None = Field(None, description="程度:轻/中/重/VAS评分")
+    nature:              list[str] = Field(default_factory=list, description="性质(多值):刺痛/胀痛/绞痛/烧灼感可同时存在")
+    severity:            list[str] = Field(default_factory=list, description="程度(多值):主观描述+0-10 NRS 评分可叠加,如['影响睡眠','7-8 分']")
     duration_pattern:    str | None = Field(None, description="时间规律:持续性/间歇性/阵发性")
     aggravating:         list[str] = Field(default_factory=list, description="加重因素")
     relieving:           list[str] = Field(default_factory=list, description="缓解因素")

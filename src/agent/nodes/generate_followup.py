@@ -1,16 +1,17 @@
 """src/agent/nodes/generate_followup.py — Agent ⑤ generate_followup(DEV_SPEC §4.1.2 ⑤+⑥)。
 
-**2 步 LLM,双 list 出口,检索前 holistic gate**(2026-05-21 拆分)。
+**2 步 LLM,双 list 出口,检索前 holistic gate**(2026-05-21 拆分 / 2026-05-22 Step A 改 flash)。
 
 定位:进 ②③④ 检索/鉴别前的最后一道 holistic gate。intake 把 13 维 slot 灌完后,
 ⑤ 用 **2 次 LLM** 决策"还差什么信息",按"患者能不能答"分两路:
-  - Step A(pro reasoner):holistic 推理,出 `askable_targets`(英文短标签)
+  - Step A(flash):holistic 看全量 state 出 `askable_targets`(英文短标签)
     + `unaskable_findings`(医生侧 description + reason)
   - Step B(flash,仅 askable_targets 非空才调):把短标签 → 患者侧自然中文问句
 
-拆 2 步原因:pro reasoner 的 thinking 是大头(~10-20s),output token 也吃时间;
-让 pro 只出短标签(~250 token 而非 ~600 token),把自然问句生成下放给 flash
-(~1-3s 完成),整体省 5-7s,且 flash 不影响问句质量。
+2026-05-22 改造:Step A 从 pro reasoner 改用 flash。原因:pro reasoner thinking
+45-180s 不稳定,且 reasoner + json_mode 嵌套 schema 偶发字段名飘 → with_retry ×
+60s wait_exponential 撞 retry storm 卡 3+ 分钟。任务本质是"对照 state 找信息缺口",
+不需 reasoner 深度;flash 5-15s 完成,嵌套 schema 输出稳定(同款经验:info_collect)。
 
 出口优先级(节点内决定 + router 据此分流):
   askable_questions 非空 → `to_wait` → ⑥
@@ -21,7 +22,7 @@
 保证下游(⑩ 或 ⑧a)始终能消费 ⑤ 累积的 unaskable 列表。
 
 LLM 调用 2 处(中安全等级):
-  - Step A `HolisticGateDecision`:`settings.llm.MODEL_NAME`(pro);失败 → 两 list 都空,router 走 ②
+  - Step A `HolisticGateDecision`:`settings.llm.FAST_MODEL_NAME`(flash);失败 → 两 list 都空,router 走 ②
   - Step B `QuestionGenOutput`:`settings.llm.FAST_MODEL_NAME`(flash);失败 → fallback
     用 target 短标签当 question 文本(降级体验,不阻塞,因为 Step A 决策已成功)
 """
@@ -91,14 +92,29 @@ def _summarize_history(history: dict) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step A:pro reasoner holistic 决策(出 askable_targets + unaskable_findings)
+# Step A:flash holistic 决策(出 askable_targets + unaskable_findings)
 # 中安全等级,失败兜底返"两 list 都空"(让 router 走 ② 检索,不阻塞流水线)
+#
+# 2026-05-22 改用 flash:之前用 pro reasoner,thinking 时间 45-180s 不稳定,
+# 且 reasoner + json_mode 嵌套 schema(unaskable_findings: list[{description, reason}])
+# 偶发字段名飘 → with_retry × 60s wait_exponential 撞 retry storm 卡 3+ 分钟。
+# flash 非 thinking,5-15s 完成,嵌套 schema 输出稳定(参考 info_collect 同款经验)。
+# trade-off:决策推理深度下降,但本节点任务是"对照已知 state 找信息缺口",
+# 不需要 reasoner 级深度,flash 经过验证决策质量过关。
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def _llm_holistic_gate_pro(state: MedicalState) -> HolisticGateDecision:
-    """Step A:pro reasoner 看全量 state 一次判 askable_targets + unaskable;
+def _llm_holistic_gate_flash(state: MedicalState) -> HolisticGateDecision:
+    """Step A:flash 看全量 state 一次判 askable_targets + unaskable;
     失败兜底返空(router 走 ②)。"""
+    # DEBUG remove: 临时观察 ⑤ Step A 实际看到的 state 三类 + slots,验证 multi-round 稳定性
+    _logger.info(
+        "[debug] ⑤ stepA_input: confirmed=%s denied=%s uncertain=%s slots=%s",
+        list(state.confirmed_symptoms),
+        list(state.denied_symptoms),
+        list(state.uncertain_symptoms),
+        _filled_slots(state.present_illness_slots),
+    )
     prompt = build_targeted_followup_prompt(
         chief_complaint=state.chief_complaint,
         present_illness=state.present_illness,
@@ -113,7 +129,7 @@ def _llm_holistic_gate_pro(state: MedicalState) -> HolisticGateDecision:
     _attempts.labels(node=_NODE, schema=_SCHEMA_STEP_A).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(
+        chain = get_llm(model=settings.llm.FAST_MODEL_NAME).with_structured_output(
             HolisticGateDecision, method="json_mode"
         ).with_retry(stop_after_attempt=3)
         result: HolisticGateDecision = chain.invoke(
@@ -122,6 +138,12 @@ def _llm_holistic_gate_pro(state: MedicalState) -> HolisticGateDecision:
                 "callbacks": [retry_observer],
                 "metadata": {"node": _NODE, "schema": _SCHEMA_STEP_A},
             },
+        )
+        # DEBUG remove: 看 Step A 决策出口,定位重复问题是 Step A 选错还是 Step B 拼错
+        _logger.info(
+            "[debug] ⑤ stepA_output: askable_targets=%s unaskable_findings=%s",
+            list(result.askable_targets),
+            [{"desc": u.description, "reason": u.reason} for u in result.unaskable_findings],
         )
         return result
     except Exception as e:
@@ -136,7 +158,7 @@ def _llm_holistic_gate_pro(state: MedicalState) -> HolisticGateDecision:
     finally:
         elapsed = time.perf_counter() - t0
         _latency.labels(node=_NODE, schema=_SCHEMA_STEP_A).observe(elapsed)
-        _logger.info("[%s] Step A pro decide elapsed=%.2fs", _NODE, elapsed)
+        _logger.info("[%s] Step A flash decide elapsed=%.2fs", _NODE, elapsed)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -167,6 +189,11 @@ def _llm_question_gen_flash(
                 "callbacks": [retry_observer],
                 "metadata": {"node": _NODE, "schema": _SCHEMA_STEP_B},
             },
+        )
+        # DEBUG remove: 看 Step B 拼出来的中文问句,对比 askable_targets 看是否拼歪
+        _logger.info(
+            "[debug] ⑤ stepB_output: questions=%s",
+            [{"target": q.target, "question": q.question} for q in result.questions],
         )
         return list(result.questions)
     except Exception as e:
@@ -204,8 +231,8 @@ def generate_followup(state: MedicalState) -> dict:
       - 无 askable 但有 unaskable → ⑧a recommend_exam(首诊模式)
       - 都空 → ② build_query
     """
-    # Step A:pro 决策(灰字"正在准备需要确认的细节…"由节点 chain_start 默认触发)
-    decision = _llm_holistic_gate_pro(state)
+    # Step A:flash 决策(灰字"正在准备需要确认的细节…"由节点 chain_start 默认触发)
+    decision = _llm_holistic_gate_flash(state)
 
     quota = settings.agent_limits.MAX_FOLLOWUP_QUESTIONS
     # 留 1 个位置给 open 兜底,所以 askable 最多 quota - 1 条

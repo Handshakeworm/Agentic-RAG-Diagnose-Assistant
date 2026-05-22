@@ -1776,8 +1776,8 @@ Milvus 写入失败时，**不回滚** PostgreSQL 中已写入的 chunk 元数�
 2. Sparse 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造):`sparse_queries` 由 state 多字段直采,每条作一次独立 BM25 查询(strip 后长度 ≥ 2 过滤、保序去重):
    - **来源 A(state 结构化字段直采)**:
      - `chief_complaint`(顶层主诉)
-     - `present_illness_slots` 单值字段:`trigger` / `location` / `nature` / `severity` / `duration_pattern` / `onset_mode`(每条独立成袋)
-     - `present_illness_slots` list 字段:`associated_symptoms` / `aggravating` / `relieving`(每个元素独立成袋)
+     - `present_illness_slots` 单值字段:`location` / `duration_pattern` / `onset_mode`(每条独立成袋)
+     - `present_illness_slots` list 字段:`associated_symptoms` / `aggravating` / `relieving` / `trigger` / `nature` / `severity`(每个元素独立成袋;2026-05-22:trigger/nature/severity 从单值改 list[str])
    - **来源 B(report 语义信号直入)**:`report_findings` 的 `positive_findings` 每条 + `impressions` 每条作为独立 BM25 词袋(已是医学文献语言,无需 EL 归一化)。这类教材高频鉴别词(如"瞳孔散大"、"右额颞线形骨折")通过 sparse 路直接召回相关 chunk,不再仅靠 Dense LLM 单点综合。
      - **阴性过滤**:`impressions` 中含 `(-)` / `正常` / `阴性` / `未见` / `无异常` 字样的整条跳过(BM25 不懂否定,反向贡献)。`abnormal_values` 原始数值与 `negative_findings` 同样不进 query。
    - **不入 sparse 的字段(理由扎实)**:`present_illness`(200+ 字必然 OR 退化)/ `treatment_tried`(拉到药学 chunk 不是诊断 chunk)/ `treatment_response`(全是"好转/无效"结论性词,无 IDF)/ `onset_time`("3 天前" KB 教材不写相对时间)/ `progression`(实测只 3 个泛词)
@@ -1953,10 +1953,10 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     # {
     #   "onset_time":          str|None,  # 起病时间（如"3天前"）
     #   "onset_mode":          str|None,  # 起病方式（急性/缓慢/隐匿）
-    #   "trigger":             str|None,  # 诱因（劳累/受凉/进食/无明显诱因）
+    #   "trigger":             list[str], # 诱因（劳累/受凉/进食/熬夜可叠加，2026-05-22:str → list[str]）
     #   "location":            str|None,  # 部位
-    #   "nature":              str|None,  # 性质（刺痛/胀痛/绞痛/烧灼感）
-    #   "severity":            str|None,  # 程度（轻/中/重/VAS评分）
+    #   "nature":              list[str], # 性质（刺痛/胀痛/绞痛可同时存在，2026-05-22:str → list[str]）
+    #   "severity":            list[str], # 程度（主观描述+NRS评分可叠加，2026-05-22:str → list[str]；客观生命体征数值如温度/血压不进此槽，进 associated_symptoms）
     #   "duration_pattern":    str|None,  # 时间规律（持续性/间歇性/阵发性）
     #   "aggravating":         list[str], # 加重因素（什么条件下加重，如吃完饭后更疼）
     #   "relieving":           list[str], # 缓解因素（什么条件下减轻）
@@ -2102,10 +2102,10 @@ def create_initial_state(patient_id: str, patient_input: str) -> MedicalState:
         present_illness_slots={
             "onset_time": None,
             "onset_mode": None,
-            "trigger": None,
+            "trigger": [],
             "location": None,
-            "nature": None,
-            "severity": None,
+            "nature": [],
+            "severity": [],
             "duration_pattern": None,
             "aggravating": [],
             "relieving": [],
@@ -2329,7 +2329,7 @@ result = graph.invoke(initial_state, config=config)
 
   **Step 2. Sparse 多字段直采(Sparse 路专用,2026-05-17 RETRIEVAL_EVAL §2 改造)**
   - **不查 terms_collection,无任何 alias 反查**;纯 state 字段拼接:
-    - 来源 A:`chief_complaint` + `present_illness_slots` 单值字段(trigger/location/nature/severity/duration_pattern/onset_mode)+ list 字段(associated_symptoms/aggravating/relieving)
+    - 来源 A:`chief_complaint` + `present_illness_slots` 单值字段(location/duration_pattern/onset_mode)+ list 字段(associated_symptoms/aggravating/relieving/trigger/nature/severity;2026-05-22:trigger/nature/severity 改 list[str])
     - 来源 B:`report_findings` 的 `positive_findings`(全加)+ `impressions`(阴性过滤:含 `(-)`/正常/阴性/未见/无异常 的整条跳过)
     - 长度 ≥ 2 + 保序去重,实测 62 case 平均 21.8 条
 
@@ -2591,7 +2591,7 @@ result = graph.invoke(initial_state, config=config)
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 graph TD;
-    __start__(["⓪ __start__<br/><i>"]):::first
+    __start__(["⓪ __start__"]):::first
     N0a("⓪a initial_ask<br/><i>• 0 LLM, 出 3 个问题等回答:还有别的不舒服吗 / 过敏慢病用药 / 孕期哺乳(女性才问)<br/>• 拉患者档案</i>")
     N1("① info_collect<br/><i>一次 LLM 同时:<br/>• 拆主诉 + 现病史 + 13 维细节<br/>• 解析 ⓪a 答的过敏/慢病/孕期 + 提取新症状, 合并写回 state</i>")
     N1b("①.5 analyze_initial_reports<br/><i>interrupt 问有无报告 → 加载/多模态解析 → report_findings</i>")

@@ -45,10 +45,14 @@ _NEGATIVE_IMPRESSION_RE = re.compile(r"\(-\)|正常|阴性|未见|无异常")
 
 # Step 2 slots 单值字段(每条 strip 后长度 ≥ 2 入 sparse)
 _SLOT_SCALAR_FIELDS = (
-    "trigger", "location", "nature", "severity", "duration_pattern", "onset_mode",
+    "location", "duration_pattern", "onset_mode",
 )
 # Step 2 slots list 字段(每条独立成袋)
-_SLOT_LIST_FIELDS = ("associated_symptoms", "aggravating", "relieving")
+# 2026-05-22:trigger/nature/severity 从 SCALAR 迁过来(schema 改 list[str] 后)
+_SLOT_LIST_FIELDS = (
+    "associated_symptoms", "aggravating", "relieving",
+    "trigger", "nature", "severity",
+)
 
 
 _logger = logging.getLogger(__name__)

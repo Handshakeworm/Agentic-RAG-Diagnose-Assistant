@@ -31,7 +31,10 @@ _logger = logging.getLogger(__name__)
 _NODE = "process_followup_answer"
 _SCHEMA = "FollowupParseResult"
 
-_MULTI_VALUE_SLOTS = {"aggravating", "relieving", "associated_symptoms"}
+_MULTI_VALUE_SLOTS = {
+    "aggravating", "relieving", "associated_symptoms",
+    "trigger", "nature", "severity",  # 2026-05-22:str → list[str] 解决多值覆盖丢失
+}
 
 # spec §4.1.2 ⑦:维度槽位 → 自然语言追加片段(避免机器格式 k=v 拉低下轮 dense_query 改写质量)
 _SLOT_PHRASES: dict[str, str] = {
@@ -256,6 +259,13 @@ def parse_followup_response(
         if addition:
             appended = (appended + "  " + addition).strip()
 
+    # DEBUG remove: 临时观察 ⑦ flash 翻译实际写到三类的内容,验证 multi-round denied 累积稳定性
+    _logger.info(
+        "[debug] ⑦ parse_result: llm_confirmed=%s llm_denied=%s llm_uncertain=%s "
+        "merged_confirmed=%s merged_denied=%s merged_uncertain=%s slot_fills=%s",
+        list(result.confirmed_symptoms), list(result.denied_symptoms), list(result.uncertain_symptoms),
+        confirmed, denied, uncertain, result.slot_fills,
+    )
     return {
         "confirmed_symptoms": confirmed,
         "denied_symptoms": denied,

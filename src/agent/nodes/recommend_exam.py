@@ -73,6 +73,12 @@ def recommend_exam(state: MedicalState) -> dict:
             tests_unique.append(t_clean)
             seen.add(t_clean)
 
+    # DEBUG remove: 看 ⑧a LLM 真实出口,定位 UI"建议检查清单为空" bug
+    _logger.info(
+        "[debug] ⑧a output: mode=%s raw_tests=%s tests_unique=%s rationale=%r",
+        mode, list(result.tests), tests_unique, result.rationale,
+    )
+
     return {
         "recommended_tests": tests_unique,
         "exam_round": state.exam_round + 1,
