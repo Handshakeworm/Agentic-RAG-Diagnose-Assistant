@@ -36,8 +36,10 @@ class DiagnoseRequest(BaseModel):
     exam_results: list[dict[str, Any]] | None = Field(
         None,
         description=(
-            "线下检查报告回传,每项 `{file_ref, ...}`(检查回传轮使用)。"
-            "file_ref 是已上传文件的路径或 URL"
+            "线下检查报告回传,2026-05-22 改为**按 group 分组**格式:"
+            "每项 `{group_label: str, files: list[str], status: 'uploaded'|'skipped'}`,"
+            "对应 ⑧a 推荐的每组。files 是 /diagnose/upload 落盘后返回的 file_ref 路径。"
+            "status='skipped' 表示患者未做该组,⑨ 跳过解析。"
         ),
     )
 

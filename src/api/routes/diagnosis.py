@@ -33,7 +33,7 @@ import time
 from collections.abc import AsyncGenerator
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from langgraph.types import Command
 from sqlalchemy.orm import Session as OrmSession
@@ -385,3 +385,80 @@ async def diagnose(
             })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# /diagnose/upload — 报告文件上传(2026-05-22 X3 新增)
+# 患者按 ⑧a 分组的每个框上传报告;前端拿 file_ref 后组装 exam_results 调 /diagnose
+# ────────────────────────────────────────────────────────────────────────────
+
+
+_UPLOAD_ROOT = settings.paths.UPLOAD_ROOT if hasattr(settings, "paths") and hasattr(settings.paths, "UPLOAD_ROOT") else "/tmp/uploads"
+_ALLOWED_MIME_PREFIXES = ("image/", "application/pdf")
+_MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB / 文件
+
+
+@router.post(
+    "/diagnose/upload",
+    summary="检查报告文件上传(multipart,返 file_ref 路径供 /diagnose exam_results 引用)",
+)
+async def diagnose_upload(
+    session_id: str = Form(..., description="对应 /diagnose 的 session_id"),
+    file: UploadFile = File(..., description="单文件上传(图片/PDF)"),
+    current_user: CurrentUser = Depends(get_current_user),
+) -> dict:
+    """落盘 + 返回 file_ref 路径。
+
+    前端按 ⑧a `recommended_test_groups` 的每框逐一调,拿到 file_ref 后组装:
+        exam_results = [
+            {"group_label": "腹部 B 超", "files": [file_ref1, file_ref2], "status": "uploaded"},
+            {"group_label": "心电图", "files": [], "status": "skipped"},
+            ...
+        ]
+    最后 POST /diagnose 带 exam_results resume graph。
+    """
+    import os
+    from pathlib import Path
+
+    # MIME 白名单
+    mime = (file.content_type or "").lower()
+    if not any(mime.startswith(p) for p in _ALLOWED_MIME_PREFIXES):
+        raise HTTPException(415, f"不支持的文件类型 {mime!r},只允许图片或 PDF")
+
+    # session_id 合法性检查(隔离不同 session 的上传目录,避免越权读写)
+    if not session_id or "/" in session_id or ".." in session_id:
+        raise HTTPException(400, "session_id 非法")
+
+    # 落盘到 _UPLOAD_ROOT/<session_id>/<timestamp>_<safe_filename>
+    safe_name = Path(file.filename or "upload").name  # strip path
+    if not safe_name:
+        safe_name = "upload"
+    ts = int(time.time() * 1000)
+    out_dir = Path(_UPLOAD_ROOT) / session_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{ts}_{safe_name}"
+
+    # 流式落盘 + 大小限制(避免一次性 read 大文件 OOM)
+    total = 0
+    with out_path.open("wb") as f:
+        while chunk := await file.read(64 * 1024):
+            total += len(chunk)
+            if total > _MAX_UPLOAD_BYTES:
+                f.close()
+                try:
+                    os.remove(out_path)
+                except OSError:
+                    pass
+                raise HTTPException(413, f"文件超过 {_MAX_UPLOAD_BYTES // 1024 // 1024} MB 上限")
+            f.write(chunk)
+
+    _logger.info(
+        "[upload] user=%s session=%s file=%s size=%d → %s",
+        current_user.user_id, session_id, safe_name, total, out_path,
+    )
+    return {
+        "file_ref": str(out_path),
+        "size": total,
+        "mime": mime,
+        "original_name": safe_name,
+    }

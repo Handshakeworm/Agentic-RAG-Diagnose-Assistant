@@ -268,8 +268,8 @@
 
     <!-- 诊断结果卡片(completed 状态) / 推荐检查清单(ongoing_exam 中态) -->
     <div x-show="diagnosis || (recommendedTests && recommendedTests.length)" class="space-y-4 fade-in">
-      <!-- 诊断疾病列表 -->
-      <div class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+      <!-- 诊断疾病列表(只在 completed 真有诊断时显示,避免 ongoing_exam 时显示空框) -->
+      <div x-show="diagnosis && diagnosis.length" class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <div class="w-2 h-2 bg-indigo-600 rounded-full"></div>
           <h3 class="text-sm font-semibold">诊断分析</h3>
@@ -332,21 +332,68 @@
         </ul>
       </div>
 
-      <!-- 推荐检查(ongoing_exam 终态) -->
-      <div x-show="recommendedTests && recommendedTests.length"
+      <!-- 推荐检查 + 分框上传(ongoing_exam 中态)— 2026-05-22 X3:每个 group 独立上传框 -->
+      <div x-show="recommendedTestGroups && recommendedTestGroups.length"
            class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <div class="w-2 h-2 bg-sky-500 rounded-full"></div>
-          <h3 class="text-sm font-semibold">建议进一步检查</h3>
+          <h3 class="text-sm font-semibold">请上传以下检查报告</h3>
         </div>
-        <ul class="px-5 py-4 space-y-1.5 text-sm">
-          <template x-for="t in (recommendedTests || [])" :key="t">
-            <li class="flex gap-1.5"><span class="text-sky-400">·</span><span x-text="t"></span></li>
+        <div class="px-5 py-4 space-y-5">
+          <template x-for="(group, gi) in (recommendedTestGroups || [])" :key="gi">
+            <div class="border-b border-slate-100 pb-4 last:border-b-0 last:pb-0">
+              <!-- group_label + items + note -->
+              <div class="text-sm font-medium mb-1">
+                <span class="text-slate-400" x-text="(gi + 1) + '.'"></span>
+                <span x-text="group.group_label"></span>
+              </div>
+              <div x-show="group.items && group.items.length" class="text-xs text-slate-500 ml-4 mb-1">
+                含:<span x-text="(group.items || []).join('、')"></span>
+              </div>
+              <div x-show="group.note" class="text-xs text-slate-400 ml-4 mb-2">
+                💡 <span x-text="group.note"></span>
+              </div>
+              <!-- 上传按钮 + 跳过按钮 + 已上传文件列表 -->
+              <div class="ml-4 flex items-center gap-2 flex-wrap">
+                <button @click="$refs['examFileInput' + gi].click()"
+                        :disabled="examGroupStatus[gi] === 'skipped' || examSubmitting"
+                        class="text-xs bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-full px-3 py-1 transition disabled:opacity-40">
+                  📁 上传文件
+                </button>
+                <input type="file" :x-ref="'examFileInput' + gi" class="hidden"
+                       accept="image/*,application/pdf" multiple
+                       @change="onExamFilesPicked(gi, $event)">
+                <button @click="toggleExamSkip(gi)"
+                        :disabled="examSubmitting"
+                        :class="examGroupStatus[gi] === 'skipped'
+                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                          : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'"
+                        class="text-xs border rounded-full px-3 py-1 transition disabled:opacity-40">
+                  <span x-text="examGroupStatus[gi] === 'skipped' ? '✓ 已跳过(点击取消)' : '跳过此项'"></span>
+                </button>
+              </div>
+              <div x-show="examGroupFiles[gi] && examGroupFiles[gi].length"
+                   class="ml-4 mt-2 flex flex-wrap gap-1.5">
+                <template x-for="(f, fi) in (examGroupFiles[gi] || [])" :key="fi">
+                  <span class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full pl-2 pr-1 py-0.5 text-xs text-slate-600">
+                    <span x-text="f.name" class="max-w-[10rem] truncate"></span>
+                    <button @click="removeExamFile(gi, fi)"
+                            :disabled="examSubmitting"
+                            class="w-4 h-4 rounded-full hover:bg-slate-100 text-slate-400 hover:text-slate-600 flex items-center justify-center disabled:opacity-30">×</button>
+                  </span>
+                </template>
+              </div>
+            </div>
           </template>
-        </ul>
-        <p class="px-5 pb-4 text-xs text-slate-400">
-          完成检查后,可以开始新问诊上传报告。
-        </p>
+        </div>
+        <div class="px-5 pb-4 pt-2 border-t border-slate-100 flex justify-end items-center gap-2">
+          <span x-show="examSubmitting" class="text-xs text-slate-400">上传中…</span>
+          <button @click="submitExamReports()"
+                  :disabled="examSubmitting || !canSubmitExam()"
+                  class="bg-indigo-600 text-white text-sm font-medium px-4 py-2 rounded-xl hover:bg-indigo-700 transition disabled:opacity-30">
+            提交全部
+          </button>
+        </div>
       </div>
 
       <button @click="resetSession()"
@@ -357,8 +404,12 @@
   </div>
 
   <!-- ────── 底部输入区 ────── -->
-  <!-- ongoing_exam(recommendedTests 非空)时也要显示,患者要在这里上传报告;只有 completed(diagnosis 有值)才彻底隐藏 -->
-  <div x-show="!diagnosis" class="fixed bottom-0 inset-x-0 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent pt-6 pb-4 px-4">
+  <!-- 隐藏条件:
+       - completed(diagnosis 有值)→ 隐藏(看结果不再输入)
+       - ongoing_exam(recommendedTestGroups 非空)→ 隐藏(用卡片内嵌分框入口上传,避免两个入口并存)
+       - 其余(首诊 / followup 轮)→ 显示底栏文本框 -->
+  <div x-show="!diagnosis && !(recommendedTestGroups && recommendedTestGroups.length)"
+       class="fixed bottom-0 inset-x-0 bg-gradient-to-t from-slate-50 via-slate-50 to-transparent pt-6 pb-4 px-4">
     <div class="max-w-3xl mx-auto space-y-2">
       <!-- 已"上传"文件预览(模拟) -->
       <div x-show="uploadedFiles.length" class="flex flex-wrap gap-2">
@@ -446,13 +497,18 @@ function app() {
     diagnosis: null,
     medication: null,
     risks: null,
-    recommendedTests: null,         // X1 兼容:扁平 list[str] = group_label,沿用旧渲染
+    recommendedTests: null,         // 扁平自然语言建议(⑫ generate_advice 写,⑬ 拼最终回复用)
     recommendedTestGroups: null,    // X3 分框 UI 用:list[{group_label, items, note}]
 
-    // ─── 上传报告(模拟,不发后端) ───
+    // ─── 上传报告(底栏老入口,保留首诊兜底) ───
     uploadedFiles: [],     // [{name, size}]
     uploadToast: '',
     _uploadToastTimer: null,
+
+    // ─── 检查回传分框(X3 ongoing_exam)─── 每框独立状态
+    examGroupFiles: {},    // { [gi]: [{name, size, file_ref?}, ...] } 选中的文件
+    examGroupStatus: {},   // { [gi]: 'uploaded'|'skipped'|'' } 跳过状态;'' 表示待操作
+    examSubmitting: false, // 提交中(disable 按钮防重复点击)
 
     // ─── 结构化追问 form(气泡内一问一控件) ───
     pendingForm: null,      // null 或 { questions: [{type, slot?, question, target?}, ...] }
@@ -547,6 +603,10 @@ function app() {
       this.medication = null;
       this.risks = null;
       this.recommendedTests = null;
+      this.recommendedTestGroups = null;
+      this.examGroupFiles = {};
+      this.examGroupStatus = {};
+      this.examSubmitting = false;
       this.apiError = '';
       this.inputText = '';
       this.uploadedFiles = [];
@@ -749,14 +809,14 @@ function app() {
             });
           }
         } else if (evt.status === 'ongoing_exam') {
-          // 2026-05-22:后端改推 recommended_test_groups(分组),X1 阶段 UI 暂 flatten 出 group_label
-          // 沿用现有渲染;X3 sprint 实现独立上传框 + 跳过按钮
-          const groups = evt.recommended_test_groups || [];
-          this.recommendedTestGroups = groups;
-          this.recommendedTests = groups.map(g => g.group_label).filter(x => x);
+          // X3:分组结构直接喂给卡片内嵌分框 UI(N 组 → N 框 + 上传 + 跳过 + 提交)
+          this.recommendedTestGroups = evt.recommended_test_groups || [];
+          // 初始化每组的本地 state(files/status 空)
+          this.examGroupFiles = {};
+          this.examGroupStatus = {};
           this.messages.push({
             role: 'assistant',
-            text: '根据现有信息,我建议您先去医院做下列检查再回来:',
+            text: '根据现有信息,建议您先做以下检查后回来上传报告:',
           });
         }
         return true;
@@ -800,6 +860,118 @@ function app() {
       this.uploadToast = `已收到 ${files.length} 个文件(模拟,本 demo 不发后端解析)`;
       clearTimeout(this._uploadToastTimer);
       this._uploadToastTimer = setTimeout(() => { this.uploadToast = ''; }, 3000);
+    },
+
+    // ───────── X3 检查回传分框相关 ─────────
+    onExamFilesPicked(gi, e) {
+      // 暂存到 examGroupFiles[gi],不立刻上传(submitExamReports 时统一传)
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
+      const list = this.examGroupFiles[gi] || [];
+      for (const f of files) {
+        list.push({ name: f.name, size: f.size, _file: f });  // _file 留着 submit 时 FormData 用
+      }
+      this.examGroupFiles[gi] = list;
+      // 选了文件就把 status 置 'uploaded'(覆盖 'skipped')
+      if (this.examGroupStatus[gi] === 'skipped') this.examGroupStatus[gi] = 'uploaded';
+      e.target.value = '';
+    },
+
+    removeExamFile(gi, fi) {
+      const list = this.examGroupFiles[gi] || [];
+      list.splice(fi, 1);
+      this.examGroupFiles[gi] = list;
+    },
+
+    toggleExamSkip(gi) {
+      if (this.examGroupStatus[gi] === 'skipped') {
+        this.examGroupStatus[gi] = '';
+      } else {
+        this.examGroupStatus[gi] = 'skipped';
+        this.examGroupFiles[gi] = [];  // 跳过就清空文件
+      }
+    },
+
+    canSubmitExam() {
+      // 至少有一组有文件 OR 有一组标了 skipped — 全空白不让提交
+      if (!this.recommendedTestGroups) return false;
+      for (let gi = 0; gi < this.recommendedTestGroups.length; gi++) {
+        const files = this.examGroupFiles[gi] || [];
+        if (files.length > 0) return true;
+        if (this.examGroupStatus[gi] === 'skipped') return true;
+      }
+      return false;
+    },
+
+    async submitExamReports() {
+      if (this.examSubmitting || !this.canSubmitExam()) return;
+      this.examSubmitting = true;
+      this.apiError = '';
+      try {
+        // 1. 逐组逐文件 POST /diagnose/upload,收集 file_refs
+        const examResults = [];
+        for (let gi = 0; gi < this.recommendedTestGroups.length; gi++) {
+          const group = this.recommendedTestGroups[gi];
+          const files = this.examGroupFiles[gi] || [];
+          const skipped = this.examGroupStatus[gi] === 'skipped';
+          if (skipped) {
+            examResults.push({
+              group_label: group.group_label,
+              files: [],
+              status: 'skipped',
+            });
+            continue;
+          }
+          if (!files.length) continue;  // 未操作的组直接跳(后端 ⑨ 看不到该组等于未做)
+          const fileRefs = [];
+          for (const f of files) {
+            const fd = new FormData();
+            fd.append('session_id', this.sessionId);
+            fd.append('file', f._file);
+            const res = await fetch('/diagnose/upload', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${this.token}` },
+              body: fd,
+            });
+            if (!res.ok) {
+              const errText = await res.text();
+              throw new Error(`上传 ${f.name} 失败 (${res.status}): ${errText.slice(0, 200)}`);
+            }
+            const data = await res.json();
+            fileRefs.push(data.file_ref);
+          }
+          examResults.push({
+            group_label: group.group_label,
+            files: fileRefs,
+            status: 'uploaded',
+          });
+        }
+
+        // 2. 用户消息气泡反馈"已提交"
+        const summary = examResults.map(r => {
+          if (r.status === 'skipped') return `${r.group_label}: 跳过`;
+          return `${r.group_label}: ${r.files.length} 个文件`;
+        }).join('\n');
+        this.messages.push({ role: 'user', text: `已上传检查报告:\n${summary}` });
+
+        // 3. 清空分框 UI 状态 + 把 recommendedTestGroups 清掉(避免重复提交)
+        this.recommendedTestGroups = null;
+        this.recommendedTests = null;
+        this.examGroupFiles = {};
+        this.examGroupStatus = {};
+        this.thinking = true;
+        this.$nextTick(() => this.scrollBottom());
+
+        // 4. POST /diagnose with exam_results,SSE 走老链路
+        await this._postDiagnose({
+          session_id: this.sessionId,
+          exam_results: examResults,
+        });
+      } catch (e) {
+        this.apiError = e.message || '上传或提交失败';
+      } finally {
+        this.examSubmitting = false;
+      }
     },
   };
 }

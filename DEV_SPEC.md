@@ -2475,7 +2475,7 @@ result = graph.invoke(initial_state, config=config)
   4. 清空 `pending_exam_results` 防重复消费；流程回到 `build_query`，带着新的客观证据重新召回和推理
 - **输出**: 追加更新 `exam_reports`（文件引用 + group_label）和 `report_findings`（结构化发现 + group_label）；清空 `pending_exam_results`
 
-> **落盘责任划分**（2026-05-14 修订）：落盘**不是 Agent 节点职责**，由 API 层在 ⑧b interrupt resume 时完成（前端 multipart upload → API 层调对象存储 / 文件系统落盘 → 把 file_ref 路径填入 `pending_exam_results` 后 resume graph）。理由：① 关注点分离 — Agent 节点只做业务逻辑（LLM 解析报告），存储是基础设施层职责；② state.exam_reports 字段定义本身就是 `[{"file_ref": str}]`，假设 file_ref 来自外部传入；③ 落盘失败应在 API 层直接返 5xx，不应跟节点 LLM 失败兜底逻辑混在一起；④ Agent 跑在何种部署形态（单进程 / Lambda / 云函数）都不必关心存储后端。
+> **落盘责任划分**（2026-05-14 修订 / 2026-05-22 上传 endpoint 实现）：落盘**不是 Agent 节点职责**，由 API 层 `POST /diagnose/upload`（multipart）完成。前端调用流程：① 按 `recommended_test_groups` 的每框逐文件 POST /diagnose/upload(form: session_id + file)→ 返 `{file_ref, size, mime}`；② 收齐每组的 file_refs + 跳过标记后，组装 `exam_results = [{group_label, files, status}]`；③ POST /diagnose with `exam_results` resume graph，⑨ process_exam_result 按 group 分流解析。理由：① 关注点分离 — Agent 节点只做业务逻辑（LLM 解析报告），存储是基础设施层职责；② state.exam_reports 字段定义本身就是 `[{"file_ref": str, "group_label"?: str}]`，假设 file_ref 来自外部传入；③ 落盘失败应在 API 层直接返 5xx，不应跟节点 LLM 失败兜底逻辑混在一起；④ Agent 跑在何种部署形态（单进程 / Lambda / 云函数）都不必关心存储后端。上传 endpoint 实现：MIME 白名单（image/* + application/pdf）+ 15MB 单文件上限 + 流式落盘到 `/tmp/uploads/<session_id>/<ts>_<safe_name>`（X3 sprint 2026-05-22）。
 
 ##### ⑩ `diagnose` — 诊断推理（Cross-Encoder 截断 + 父块扩展 + **1 步 LLM**）
 - **输入**: `candidate_chunks`, `chief_complaint`, `present_illness`, `confirmed_symptoms`, `denied_symptoms`, `uncertain_symptoms`, `present_illness_slots`, `medical_history`, `report_findings`, `unaskable_symptoms`, `followup_round`
