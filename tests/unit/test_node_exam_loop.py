@@ -163,14 +163,27 @@ def test_process_exam_result_appends_reports_and_findings(mock_parse):
         }
     ]
 
+    # 2026-05-22:pending_exam_results 改成 group 结构 [{group_label, files, status}]
     s = create_initial_state(patient_id="P", patient_input="x")
     s.exam_reports = [{"file_ref": "/already/old.jpg"}]  # base = 1
-    s.pending_exam_results = [{"file_ref": "/new/lab.pdf"}]
+    s.recommended_test_groups = [
+        {"group_label": "腹部 B 超", "items": ["腹部超声"], "note": "需空腹"},
+    ]
+    s.pending_exam_results = [
+        {"group_label": "腹部 B 超", "files": ["/new/lab.pdf"], "status": "uploaded"},
+    ]
     update = process_exam_result(s)
 
     assert len(update["exam_reports"]) == 2
+    assert update["exam_reports"][1]["group_label"] == "腹部 B 超"
     assert update["report_findings"][0]["report_index"] == 1  # base + 0
+    assert update["report_findings"][0]["group_label"] == "腹部 B 超"
     assert update["pending_exam_results"] == []
+    # 验证 hint 透传给 parse_reports
+    call_kwargs = mock_parse.call_args.kwargs
+    assert "腹部 B 超" in call_kwargs.get("hint", "")
+    assert "腹部超声" in call_kwargs.get("hint", "")
+    assert "需空腹" in call_kwargs.get("hint", "")
 
 
 def test_process_exam_result_empty_pending_returns_empty():

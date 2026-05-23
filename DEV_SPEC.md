@@ -2466,10 +2466,14 @@ result = graph.invoke(initial_state, config=config)
 ##### ⑨ `process_exam_result` — 处理检查结果回传
 - **输入**: `pending_exam_results`（由 ⑧b 写入 State，用户上传的检查结果——体格检查结论 或 辅助检查报告，可能是多项；**已是落盘后的 file_ref 引用**，原始文件落盘由 API 层在 ⑧b interrupt resume 时完成，见下方"落盘责任划分"段）
 - **职责**:
-  1. **文件引用追加**：将 `{"file_ref": pending_exam_results 中已带的路径}` 追加到 `exam_reports`
-  2. **结构化提取**：通过 `load_report(file_ref)` 按需加载（图片转 base64 / PDF 直传），调用 `src/agent/utils/report_parser.py` 中的共享解析函数（与 Node ①.5 复用相同逻辑），多模态 LLM 直读 → 提取结构化发现，追加到 `report_findings`
-  3. 清空 `pending_exam_results` 防重复消费；流程回到 `build_query`，带着新的客观证据重新召回和推理
-- **输出**: 追加更新 `exam_reports`（文件引用）和 `report_findings`（结构化发现）；清空 `pending_exam_results`
+  1. **按 group 分流**（2026-05-22 改造）：`pending_exam_results` 是 `list[{group_label, files, status}]`；
+     - `status == "skipped"` → 跳过该组（患者未做），记 log；⑩ diagnose 看到无此组报告会推断为缺失
+     - `status == "uploaded"` → 按本组 files 调一次 `parse_reports(files, hint=<group_label + items + note>)`，
+       多模态 LLM 解析时 hint 帮定位报告类型（化验 vs 影像 vs 病历），提升解析准确度
+  2. **文件引用追加**：`{"file_ref": <path>, "group_label": <label>}` 追加到 `exam_reports`（group_label 帮 ⑩ 追溯）
+  3. **结构化提取**：通过 `load_report(file_ref)` 按需加载（图片转 base64 / PDF 直传），调用 `src/agent/utils/report_parser.py` 中的共享解析函数（与 Node ①.5 复用相同逻辑），多模态 LLM 直读 → 提取结构化发现 → finding 也带 `group_label` 字段追溯，追加到 `report_findings`
+  4. 清空 `pending_exam_results` 防重复消费；流程回到 `build_query`，带着新的客观证据重新召回和推理
+- **输出**: 追加更新 `exam_reports`（文件引用 + group_label）和 `report_findings`（结构化发现 + group_label）；清空 `pending_exam_results`
 
 > **落盘责任划分**（2026-05-14 修订）：落盘**不是 Agent 节点职责**，由 API 层在 ⑧b interrupt resume 时完成（前端 multipart upload → API 层调对象存储 / 文件系统落盘 → 把 file_ref 路径填入 `pending_exam_results` 后 resume graph）。理由：① 关注点分离 — Agent 节点只做业务逻辑（LLM 解析报告），存储是基础设施层职责；② state.exam_reports 字段定义本身就是 `[{"file_ref": str}]`，假设 file_ref 来自外部传入；③ 落盘失败应在 API 层直接返 5xx，不应跟节点 LLM 失败兜底逻辑混在一起；④ Agent 跑在何种部署形态（单进程 / Lambda / 云函数）都不必关心存储后端。
 

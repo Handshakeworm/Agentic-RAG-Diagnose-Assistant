@@ -136,18 +136,28 @@ def build_info_collect_prompt(
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def build_report_parsing_prompt(num_reports: int) -> str:
+def build_report_parsing_prompt(
+    num_reports: int,
+    hint: str | None = None,
+) -> str:
     """①.5 / ⑨ 多模态 LLM 直读报告 → 结构化关键发现。
 
     Args:
         num_reports: 本次解析的报告数量,prompt 中提示 LLM 输出对应数量的 finding 项
+        hint: 可选上下文提示,如"这组报告是 <group_label>,期望含 <items>"。
+              ⑨ 按 group 分别调用时传入,帮 LLM 定位报告类型(化验 vs 影像 vs 病历)
+              提升解析准确度。①.5 入站解析(患者一次混传)时不带 hint。
 
     多模态附件(图片 base64 / PDF 文件)由调用方组装到 LangChain message 中,
     本函数只产文本提示部分。
     """
+    hint_block = ""
+    if hint:
+        hint_block = f"\n【上下文提示】\n{hint}\n"
+
     return f"""你是医学报告结构化解析助手。下面附了 {num_reports} 份检查报告(图片或 PDF)。
 请逐份解析,产出结构化的 ReportFindings 列表,每份报告对应 findings 列表中的一项。
-
+{hint_block}
 【提取规则】
 - report_type:从 ['blood_routine','urine_routine','biochemistry','imaging','ecg',
   'physical_exam','pathology','other'] 中选最贴切的

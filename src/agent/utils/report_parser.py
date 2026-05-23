@@ -61,8 +61,13 @@ def _build_multimodal_message(file_refs: list[str], prompt_text: str) -> HumanMe
     return HumanMessage(content=content)
 
 
-def parse_reports(file_refs: list[str]) -> list[dict]:
+def parse_reports(file_refs: list[str], hint: str | None = None) -> list[dict]:
     """主入口:接收文件引用列表,返回结构化 finding 列表(已补 report_index)。
+
+    Args:
+        file_refs: 落盘后的文件路径 list
+        hint: 可选上下文,如 "这组报告是 '抽血化验(空腹8h)',期望含 血常规、肝功能、淀粉酶";
+              ⑨ 按 group 分别调用时传,⑩ 解析时更准。①.5 入站混传不带。
 
     Returns:
         list[dict],每项形态见 spec §4.1.1 report_findings 字段:
@@ -76,7 +81,7 @@ def parse_reports(file_refs: list[str]) -> list[dict]:
 
     node = "analyze_reports"
     schema = "ReportFindings"
-    prompt = build_report_parsing_prompt(num_reports=len(file_refs))
+    prompt = build_report_parsing_prompt(num_reports=len(file_refs), hint=hint)
     message = _build_multimodal_message(file_refs, prompt)
 
     _attempts.labels(node=node, schema=schema).inc()
