@@ -1,12 +1,13 @@
 """src/agent/nodes/intake_followup_ask.py — 入站 slot 收集 + 翻译节点(DEV_SPEC §4.1.3)。
 
-**单一职责**:把 PresentIllnessSlots 13 维 slot 一次性问全 + LLM holistic 翻译。
+**单一职责**:把 PresentIllnessSlots 12 维 slot 一次性问全 + LLM holistic 翻译。
 
 - 节点内 multi-interrupt(分批弹 form,每批 4 slot + 1 open):
   - 第 1 批:onset_time / onset_mode / trigger / location + open
   - 第 2 批:nature / severity / duration_pattern / aggravating + open
-  - 第 3 批:relieving / associated_symptoms / progression / treatment_tried + open
-  - 第 4 批:treatment_response + open(剩 1 个)
+  - 第 3 批:relieving / associated_symptoms / progression / treatments + open
+- 2026-05-22:treatment_tried + treatment_response 合并为 treatments,12 维正好分 3 批
+  (旧 13 维需 4 批,第 4 批只剩 1 题,改善 UX:用户少 1 次提交)
 - 全部 batch 收完 → **一次 LLM holistic 翻译**累积的所有 batch answer(复用 ⑦ 的
   `parse_followup_response` helper),把 slot 原文写回 state.present_illness_slots,
   顺带 merge history/obstetric 进 medical_history,append new_symptoms 进 confirmed_symptoms
@@ -48,8 +49,7 @@ _SLOT_QUESTION_TEMPLATES: dict[str, str] = {
     "relieving":          "做什么能让症状缓解一些?",
     "associated_symptoms":"除了主要的不适,有没有其他同时出现的症状(发热、恶心、出汗等)?",
     "progression":        "和最开始相比,症状是加重、减轻还是没变化?",
-    "treatment_tried":    "之前有没有自己吃过药或采取过其他措施?",
-    "treatment_response": "用过药的话,效果怎么样?",
+    "treatments":         "之前自己用过什么药或采取过什么措施?效果怎么样?(用过几样的话,一样一样说)",
 }
 
 _TYPE_TEMPLATES: dict[str, str] = {
@@ -89,11 +89,11 @@ def _build_question_text(questions: list[dict]) -> str:
 # ────────────────────────────────────────────────────────────────────────────
 
 
-_BATCH_SIZE = 4  # 每批 4 slot 题 + 1 open;13 / 4 ≈ 4 批
+_BATCH_SIZE = 4  # 每批 4 slot 题 + 1 open;12 / 4 = 3 批(整除,UX 改善)
 
 
 def intake_followup_ask(state: MedicalState) -> dict:
-    """multi-interrupt 收 13 维 slot batch + LLM holistic 翻译 → 出口 ⑤。"""
+    """multi-interrupt 收 12 维 slot batch + LLM holistic 翻译 → 出口 ⑤。"""
     slot_names = list(state.present_illness_slots.model_dump().keys())
     asked: set[str] = set()
     accumulated_questions: list[dict] = []

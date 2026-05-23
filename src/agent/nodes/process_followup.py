@@ -34,6 +34,7 @@ _SCHEMA = "FollowupParseResult"
 _MULTI_VALUE_SLOTS = {
     "aggravating", "relieving", "associated_symptoms",
     "trigger", "nature", "severity",  # 2026-05-22:str → list[str] 解决多值覆盖丢失
+    "treatments",  # 2026-05-22:treatment_tried+treatment_response 合并为 treatments
 }
 
 # spec §4.1.2 ⑦:维度槽位 → 自然语言追加片段(避免机器格式 k=v 拉低下轮 dense_query 改写质量)
@@ -49,8 +50,7 @@ _SLOT_PHRASES: dict[str, str] = {
     "relieving": "{value}时缓解",
     "associated_symptoms": "伴随{value}",
     "progression": "病程演变:{value}",
-    "treatment_tried": "诊疗经过:{value}",
-    "treatment_response": "治疗反应:{value}",
+    "treatments": "诊疗经过:{value}",  # value 是 list,每条 '<治疗>: <反应>' 顿号串拼起来
 }
 
 

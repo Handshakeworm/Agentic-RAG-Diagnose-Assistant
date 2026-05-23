@@ -29,8 +29,13 @@ class PresentIllnessSlots(BaseModel):
     relieving:           list[str] = Field(default_factory=list, description="缓解因素")
     associated_symptoms: list[str] = Field(default_factory=list, description="伴随症状(患者自述)")
     progression:         str | None = Field(None, description="病程演变:加重/减轻/稳定/波动")
-    treatment_tried:     str | None = Field(None, description="诊疗经过:看过没、用过什么药")
-    treatment_response:  str | None = Field(None, description="治疗反应:有效/无效/加重")
+    treatments:          list[str] = Field(
+        default_factory=list,
+        description=(
+            "诊疗经过(多值,半结构化):每条记录格式 '<治疗>: <反应>',如 "
+            "['布洛芬: 无效', '热敷: 部分缓解'];多次治疗各成一条,解决 tried/response 跨字段对齐"
+        ),
+    )
 
 
 class InfoCollectOutput(BaseModel):

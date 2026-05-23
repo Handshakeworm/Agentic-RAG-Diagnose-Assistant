@@ -23,9 +23,9 @@ class FollowupParseResult(BaseModel):
         default_factory=dict,
         description=(
             "维度级回填,key=槽位名;value 类型与 PresentIllnessSlots 槽位一致:"
-            "单值槽(onset_time/onset_mode/location/duration_pattern/progression/"
-            "treatment_tried/treatment_response)为 str,"
-            "多值槽(trigger/nature/severity/aggravating/relieving/associated_symptoms)为 list[str]"
+            "单值槽(onset_time/onset_mode/location/duration_pattern/progression)为 str,"
+            "多值槽(trigger/nature/severity/aggravating/relieving/associated_symptoms/treatments)为 list[str]"
+            "(treatments 每条半结构化 '<治疗>: <反应>')"
         ),
     )
     confirmed_symptoms: list[str] = Field(

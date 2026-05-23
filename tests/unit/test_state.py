@@ -4,7 +4,7 @@ State 一旦上线就被 16 节点 + 2 路由器读写,任何字段缺失/类型
 这些测试把 spec 文本契约钉死在断言里:
 - §4.1.1 字段清单(37 个)+ Pydantic BaseModel 形态
 - §4.1.1a 初始值表
-- 13 维 PresentIllnessSlots(3 list[str] + 10 str | None,且自身是 BaseModel)
+- 12 维 PresentIllnessSlots(7 list[str] + 5 str | None,且自身是 BaseModel)
 - SessionTokenUsage / SessionLatencyMs 嵌套 BaseModel
 - 多 session 不共享可变对象(避免 list 别名 bug)
 - §9.2 schema 演化:加字段必须有默认 + 类型校验 immediate ValidationError
@@ -79,23 +79,27 @@ def test_caller_required_fields_validated() -> None:
 
 
 def test_present_illness_slots_13_dimensions_strongly_typed() -> None:
-    """§4.1.1 现病史 13 维 — 现在是强类型 PresentIllnessSlots BaseModel,不再是裸 dict。"""
+    """§4.1.1 现病史 12 维 — 现在是强类型 PresentIllnessSlots BaseModel,不再是裸 dict。"""
     from src.agent.state import PresentIllnessSlots, create_initial_state
 
     slots = create_initial_state(patient_id="P001", patient_input="x").present_illness_slots
     assert isinstance(slots, PresentIllnessSlots)
 
-    # 2026-05-22:trigger/nature/severity 从单值改 list[str](解决多值覆盖)
+    # 2026-05-22:
+    #   (a) trigger/nature/severity 从单值改 list[str](解决多值覆盖)
+    #   (b) treatment_tried + treatment_response 合并为 treatments: list[str]
+    #       (半结构化 "<治疗>: <反应>",13 维 → 12 维)
     multi_value = {
         "aggravating", "relieving", "associated_symptoms",
         "trigger", "nature", "severity",
+        "treatments",
     }
     single_value = {
         "onset_time", "onset_mode", "location", "duration_pattern",
-        "progression", "treatment_tried", "treatment_response",
+        "progression",
     }
     assert set(PresentIllnessSlots.model_fields.keys()) == multi_value | single_value
-    assert len(PresentIllnessSlots.model_fields) == 13
+    assert len(PresentIllnessSlots.model_fields) == 12
 
     for k in multi_value:
         assert getattr(slots, k) == [], f"{k} 应为空 list"

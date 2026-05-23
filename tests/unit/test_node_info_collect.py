@@ -40,8 +40,7 @@ def test_full_input_fills_all_slots(mock_llm_factory):
         relieving=["热敷"],
         associated_symptoms=["反酸"],
         progression="加重",
-        treatment_tried="服用奥美拉唑",
-        treatment_response="部分缓解",
+        treatments=["奥美拉唑: 部分缓解"],
     )
     mock_chain = mock_llm_factory.return_value.with_structured_output.return_value.with_retry.return_value
     mock_chain.invoke.return_value = InfoCollectOutput(
@@ -61,7 +60,7 @@ def test_full_input_fills_all_slots(mock_llm_factory):
     assert slots.onset_time == "3天前"
     assert slots.aggravating == ["进食", "饥饿"]
     assert slots.associated_symptoms == ["反酸"]
-    assert slots.treatment_response == "部分缓解"
+    assert slots.treatments == ["奥美拉唑: 部分缓解"]
 
     # ① 合并了 ⑦ 在 to_info_collect 路径上的活:LLM 没返 history/obstetric/new_symptoms
     # 时,medical_history merge 后等于 state 原值(此处空 dict),confirmed_symptoms 不新增

@@ -139,7 +139,7 @@ def test_normal_confirmed_path(stub_dbs):
         location="上腹", nature=["胀痛"], severity=["中"],
         duration_pattern="持续性", aggravating=["进食"], relieving=["热敷"],
         associated_symptoms=["反酸"], progression="加重",
-        treatment_tried="奥美拉唑", treatment_response="部分缓解",
+        treatments=["奥美拉唑: 部分缓解"],
     )
 
     structured_invokes = [

@@ -119,13 +119,13 @@ def build_info_collect_prompt(
 1. chief_complaint(主诉):主要症状 + 持续时间,1 句话,例:"腹痛3天" —— **来源限 patient_input**
 2. present_illness(现病史):用 1-3 句话展开本次发病的:起病时间、诱因、症状特点
    (部位/性质/程度)、伴随症状、加重/缓解因素、治疗经过 —— **主要来源 patient_input**
-3. present_illness_slots(13 维结构化槽位)—— **主要来源 patient_input**,form 答案附带的细节
+3. present_illness_slots(12 维结构化槽位)—— **主要来源 patient_input**,form 答案附带的细节
    也可填入:
-   - 单值槽(str | None):onset_time / onset_mode / location / duration_pattern /
-     progression / treatment_tried / treatment_response
+   - 单值槽(str | None):onset_time / onset_mode / location / duration_pattern / progression
    - 多值槽(list[str]):aggravating(加重因素) / relieving(缓解因素) /
      associated_symptoms(伴随症状) / trigger(诱因,可叠加) / nature(性质,可多) /
-     severity(程度,主观描述 + NRS 评分可叠加)
+     severity(程度,主观描述 + NRS 评分可叠加) /
+     treatments(诊疗经过,每条半结构化 '<治疗>: <反应>',如 ['布洛芬: 无效', '热敷: 部分缓解'])
    - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**{form_extraction_lines}
 
 注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。""" + _JSON_TAIL
@@ -259,7 +259,7 @@ def build_smart_followup_prompt(
     """④ 1 次 LLM 同时出 questions(追问) + unaskable_symptoms(粗筛)。"""
     filled_lines = [f"  - {k}: {_format_slot_value(v)}" for k, v in filled_slots.items() if v]
     filled_block = "\n".join(filled_lines) if filled_lines else "  (无,全部空缺)"
-    empty_block = ", ".join(empty_slots) or "(无,13 维已全部填满)"
+    empty_block = ", ".join(empty_slots) or "(无,12 维已全部填满)"
     conf_block = "、".join(confirmed_symptoms) or "(无)"
     den_block = "、".join(denied_symptoms) or "(无)"
     unc_block = "、".join(uncertain_symptoms) or "(无)"
@@ -274,7 +274,7 @@ def build_smart_followup_prompt(
 (若某维度 value 为 "(患者未明确)" 或列表含此值,表示**已问过但患者答不上**;
  视为该维度信息已采集完毕,**不要重复追问**;诊断推理时把它当作"患者明确否认/不知"看待)
 
-【空缺的 HPI 维度】(13 维框架内尚未问到的)
+【空缺的 HPI 维度】(12 维框架内尚未问到的)
 {empty_block}
 
 【已确认有的症状】{conf_block}
@@ -291,7 +291,7 @@ def build_smart_followup_prompt(
    - 不要选已填的;不要重复
 
 2. **type="open"** — 开放式问"还有别的不舒服吗?"
-   - 适合用在:13 维已大部分填满 / 空缺维度都不重要 / 想兜底捕获遗漏症状
+   - 适合用在:12 维已大部分填满 / 空缺维度都不重要 / 想兜底捕获遗漏症状
    - 一轮**最多 1 条** open(再多无意义,患者也想不出更多)
    - `slot` 字段留 None
 
@@ -384,10 +384,9 @@ def build_followup_parse_prompt(
 
 【解析规则】
 1. 维度级回填(slot_fills,key=槽位名):
-   - 单值槽(onset_time/onset_mode/location/duration_pattern/progression/
-     treatment_tried/treatment_response):value=str
-   - 多值槽(trigger/nature/severity/aggravating/relieving/associated_symptoms):value=list[str]
-   - 槽位名必须是 HPI 13 维之一,不要新造槽名
+   - 单值槽(onset_time/onset_mode/location/duration_pattern/progression):value=str
+   - 多值槽(trigger/nature/severity/aggravating/relieving/associated_symptoms/treatments):value=list[str]
+   - 槽位名必须是 HPI 12 维之一,不要新造槽名
    - **severity 槽特殊规则**:只填**主观严重度描述**(轻/中/重 / 影响睡眠/吃饭/活动 /
      0-10 NRS 评分)。**绝对不要填客观生命体征数值或化验值**(温度、血压、脉搏、SpO2、
      血糖、WBC 等)— 这些数值应写到 associated_symptoms 多值槽里。
@@ -395,6 +394,14 @@ def build_followup_parse_prompt(
        - ❌ severity=["38℃"]   → 应是 associated_symptoms 加 "发热 38℃"
        - ❌ severity=["150/95"] → 应是 associated_symptoms 加 "BP 升高 150/95"
        - ❌ severity=["WBC 12.5"] → 化验值不进 slot,等 ⑨ 解析报告
+   - **treatments 槽特殊规则**:每条记录半结构化 `"<治疗>: <反应>"`,治疗 + 反应
+     合写一条,**不要拆成两个字段**(旧设计 treatment_tried/treatment_response 已合并)。
+     患者答多种治疗时一样一条:
+       - ✅ treatments=["布洛芬: 无效", "热敷: 部分缓解"]
+       - ✅ treatments=["奥美拉唑: 显著好转"]
+       - ❌ treatments=["布洛芬, 热敷", "无效, 部分缓解"](拆成 2 条平行)
+       - 患者只说用了什么没说反应 → 反应写"未提及",如 "布洛芬: 未提及"
+       - 患者只说"有效/无效"没说具体药 → 跳过(无法配对)
    - **本轮被询问到的 slot,患者明确答"不知道/不清楚/没注意/没有/无"等**否定或不知:
      在 slot_fills 中写入哨兵值标记"已问无答",避免下游循环重问:
        - 单值槽 value="(患者未明确)"
@@ -434,7 +441,7 @@ def build_followup_parse_prompt(
 ```
 {{
   "slot_fills": {{
-    "<HPI 13 维之一的英文槽名,如 onset_time / location / aggravating>": "<单值槽 str 或多值槽 list[str]>"
+    "<HPI 12 维之一的英文槽名,如 onset_time / location / aggravating>": "<单值槽 str 或多值槽 list[str]>"
   }},
   "confirmed_symptoms": ["<患者明确确认的症状,如 '恶心'>", "..."],
   "denied_symptoms": ["<患者明确否认的症状,如 '呕吐'>", "..."],
@@ -459,7 +466,7 @@ def build_followup_parse_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# intake_followup_ask LLM 针对性阶段(13 维 slot 全填后调一次)
+# intake_followup_ask LLM 针对性阶段(12 维 slot 全填后调一次)
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -495,7 +502,7 @@ def build_targeted_followup_prompt(
 【当前已知】
 - 主诉:{chief_complaint}
 - 现病史:{present_illness}
-- HPI 13 维(已填部分):
+- HPI 12 维(已填部分):
 {slots_block}
   (若某 value 为 "(患者未明确)" 或列表含此值:**已问过但患者答不上**,**不要再对该维度追问**;
    但可以把它列进 unaskable_findings,让 ⑧a 推查体/检查去拿这个信息)

@@ -51,10 +51,12 @@ SLOT_UNKNOWN_SENTINEL = "(患者未明确)"
 
 
 class PresentIllnessSlots(BaseModel):
-    """§4.1.1 现病史 13 维结构化槽位(6 个多值 list[str] + 7 个 str | None)。
+    """§4.1.1 现病史 12 维结构化槽位(7 个多值 list[str] + 5 个 str | None)。
 
-    2026-05-22:trigger / nature / severity 从 str → list[str] —— 实测患者经常给多值
-    (多诱因叠加 / 钝痛+胀+绞痛 / 影响睡眠+7-8 分),单值字段会覆盖丢失。
+    2026-05-22(分两步):
+      - 第 1 步:trigger / nature / severity 从 str → list[str]
+      - 第 2 步:treatment_tried + treatment_response 合并为 treatments: list[str]
+        (一条记录半结构化 "<治疗>: <反应>",解决跨字段对齐 + 多次治疗记录)
     """
 
     onset_time: str | None = None
@@ -68,8 +70,7 @@ class PresentIllnessSlots(BaseModel):
     relieving: list[str] = Field(default_factory=list)
     associated_symptoms: list[str] = Field(default_factory=list)
     progression: str | None = None
-    treatment_tried: str | None = None
-    treatment_response: str | None = None
+    treatments: list[str] = Field(default_factory=list)
 
 
 class SessionTokenUsage(BaseModel):
