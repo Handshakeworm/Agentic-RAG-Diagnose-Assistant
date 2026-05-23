@@ -322,7 +322,7 @@ Agentic-RAG-Medical-care-Assistant/
 
 - FastAPI 应用（`src/api/app.py`），提供诊断、患者管理、健康检查、管理等路由
 - 请求/响应 Schema 校验（`src/api/schemas/`）
-- 状态图驱动的多步诊断流程(`src/agent/graph.py`),HPI 13 维填空驱动的迭代式追问工作流
+- 状态图驱动的多步诊断流程(`src/agent/graph.py`),HPI 12 维填空驱动的迭代式追问工作流
 - 节点(15 个):病史采集、初始报告解析、Query 构建、向量召回、智能追问选择、追问生成(⑤)、追问等待(⑥)、追问处理、建议检查(⑧a)、检查结果等待(⑧b)、检查结果处理、诊断推理、安全约束门控、建议生成、格式化回复(`src/agent/nodes/`)
 - 路由器（2 个）：should_continue（追问/诊断两路路由）、diagnose_router（诊断后路由：need_exam / safety_gate）（`src/agent/routers/`）
 - 数据摄取 Pipeline：MinerU 文档解析 → Chunking → LLM 增强（摘要/问题生成/图片描述） → 幂等写入 → Embedding → 向量存储（`src/rag/ingestion/`）

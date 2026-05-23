@@ -192,35 +192,58 @@
               </div>
             </template>
 
-            <!-- type=report_upload: 文件选择按钮 + 已选文件列表 + "无,跳过" 快捷
-                 (模拟通路,不真发后端;后端 ①.5 看到 "已上传" 关键字给 state 加 placeholder) -->
+            <!-- type=report_upload: N 个独立报告框,每框 = 一份独立报告(可多文件:PDF 1 个或图片多张)
+                 2026-05-23 X4:真发后端 - 提交时逐文件 POST /diagnose/upload,组装 exam_results
+                 走 SSE,后端 ①.5 真调 parse_reports 多模态解析 -->
             <template x-if="q.type === 'report_upload'">
-              <div class="space-y-2">
-                <div class="flex items-center gap-2 flex-wrap">
-                  <button @click="$refs['fileInputForm' + qi].click()"
-                          class="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs hover:bg-indigo-100 transition">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    选择文件
-                  </button>
-                  <input type="file" :x-ref="'fileInputForm' + qi" class="hidden"
-                         accept="image/*,application/pdf" multiple
-                         @change="onReportFilesPicked(qi, $event)">
-                  <button @click="formAnswers[qi] = { skip: true, files: [] }"
-                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">无,跳过</button>
-                </div>
-                <!-- 已选文件列表 -->
-                <template x-if="formAnswers[qi]?.files?.length">
-                  <div class="flex flex-wrap gap-1.5">
-                    <template x-for="(f, fi) in formAnswers[qi].files" :key="fi">
-                      <span class="inline-flex items-center gap-1 bg-slate-50 border border-slate-200 rounded-full pl-2.5 pr-1 py-0.5 text-xs text-slate-600">
-                        <span x-text="f.name" class="max-w-[10rem] truncate"></span>
-                        <button @click="removeReportFile(qi, fi)" class="w-4 h-4 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center">×</button>
-                      </span>
+              <div class="space-y-3">
+                <!-- 每份报告框(label + 文件选择 + 已选列表 + 单独移除) -->
+                <template x-for="(g, gi) in (formAnswers[qi]?.groups || [{label: '', files: []}])" :key="gi">
+                  <div class="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50/40">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-slate-500 shrink-0" x-text="'报告 ' + (gi + 1)"></span>
+                      <input type="text" :value="g.label"
+                             @input="setReportGroupLabel(qi, gi, $event.target.value)"
+                             placeholder="如:血常规 / 腹部B超(选填)"
+                             class="flex-1 border border-slate-200 rounded-md px-2 py-1 text-xs focus:outline-none focus:border-indigo-400 bg-white">
+                      <button x-show="(formAnswers[qi]?.groups || []).length > 1"
+                              @click="removeReportGroup(qi, gi)"
+                              class="text-xs text-slate-400 hover:text-rose-600 shrink-0"
+                              title="移除此份报告">× 移除</button>
+                    </div>
+                    <div class="flex items-center gap-2 flex-wrap">
+                      <button @click="$refs['fileInputForm_' + qi + '_' + gi]?.click()"
+                              class="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs hover:bg-indigo-100 transition">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                        </svg>
+                        选择文件
+                      </button>
+                      <input type="file" :x-ref="'fileInputForm_' + qi + '_' + gi" class="hidden"
+                             accept="image/*,application/pdf" multiple
+                             @change="onReportGroupFilesPicked(qi, gi, $event)">
+                      <span class="text-xs text-slate-400">PDF 选 1 个 / 图片可多张</span>
+                    </div>
+                    <template x-if="g.files?.length">
+                      <div class="flex flex-wrap gap-1.5">
+                        <template x-for="(f, fi) in g.files" :key="fi">
+                          <span class="inline-flex items-center gap-1 bg-white border border-slate-200 rounded-full pl-2.5 pr-1 py-0.5 text-xs text-slate-600">
+                            <span x-text="f.name" class="max-w-[10rem] truncate"></span>
+                            <button @click="removeReportGroupFile(qi, gi, fi)" class="w-4 h-4 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center">×</button>
+                          </span>
+                        </template>
+                      </div>
                     </template>
                   </div>
                 </template>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button @click="addReportGroup(qi)"
+                          class="text-xs bg-white hover:bg-slate-50 text-indigo-600 border border-indigo-200 rounded-lg px-3 py-1.5 transition">
+                    + 添加另一份报告
+                  </button>
+                  <button @click="formAnswers[qi] = { skip: true, groups: [] }"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">无,跳过</button>
+                </div>
                 <template x-if="formAnswers[qi]?.skip">
                   <p class="text-xs text-slate-400">已选择跳过</p>
                 </template>
@@ -661,10 +684,15 @@ function app() {
           if (a && a.lact) parts.push(`哺乳:${map[a.lact]}`);
           if (parts.length) lines.push(`${label} — ${parts.join('; ')}`);
         } else if (q.type === 'report_upload') {
-          const files = a?.files || [];
-          if (files.length) {
-            const names = files.map(f => f.name).join('、');
-            lines.push(`${label}:已上传 ${files.length} 个文件 — ${names}`);
+          // X4:用户视角的"我上传了什么"摘要(只用于聊天记录回显,真发后端走 exam_results)
+          const groups = a?.groups || [];
+          const filled = groups.filter(g => (g.files || []).length > 0);
+          if (filled.length) {
+            const segs = filled.map((g, i) => {
+              const lab = (g.label || '').trim() || `报告${i + 1}`;
+              return `${lab}(${g.files.length} 个文件)`;
+            });
+            lines.push(`${label}:已上传 ${filled.length} 份 — ${segs.join('、')}`);
           } else if (a?.skip) {
             lines.push(`${label}:无`);
           }
@@ -676,25 +704,74 @@ function app() {
       return lines.join('\n');
     },
 
-    onReportFilesPicked(qi, e) {
-      // 模拟上传:只收文件名,不发后端、不持久化(跟底栏上传按钮一致)
+    // ─── X4: report_upload 分框管理 ──────────────────────────────
+    // formAnswers[qi] 结构:{ groups: [{label: '', files: [{name, size, _file}]}], skip: bool }
+    // 一框 = 一份独立报告;label 选填(空时后端 fallback "报告N");files 可多(图片多张 / PDF 1 个)
+    // _file 留 File 对象,submit 时走 POST /diagnose/upload 真传
+
+    _ensureReportGroups(qi) {
+      // 懒初始化:首次访问时给 qi 建立 {groups: [{label,files}], skip: false}
+      const cur = this.formAnswers[qi];
+      if (cur && Array.isArray(cur.groups)) return cur;
+      const init = { groups: [{ label: '', files: [] }], skip: false };
+      this.formAnswers[qi] = init;
+      return init;
+    },
+
+    addReportGroup(qi) {
+      const cur = this._ensureReportGroups(qi);
+      cur.groups.push({ label: '', files: [] });
+      this.formAnswers[qi] = { ...cur, skip: false };
+    },
+
+    removeReportGroup(qi, gi) {
+      const cur = this._ensureReportGroups(qi);
+      if (cur.groups.length <= 1) return;  // 至少保留 1 框(想清空走"无,跳过")
+      cur.groups.splice(gi, 1);
+      this.formAnswers[qi] = { ...cur };
+    },
+
+    setReportGroupLabel(qi, gi, label) {
+      const cur = this._ensureReportGroups(qi);
+      if (!cur.groups[gi]) return;
+      cur.groups[gi].label = label;
+      this.formAnswers[qi] = { ...cur };
+    },
+
+    onReportGroupFilesPicked(qi, gi, e) {
+      // 选了文件就把 skip 关掉;_file 保留给 submit 时 FormData 用
       const files = Array.from(e.target.files || []);
-      const cur = this.formAnswers[qi] || {};
-      const list = (cur.files || []).slice();
-      for (const f of files) list.push({ name: f.name, size: f.size });
-      this.formAnswers[qi] = { ...cur, files: list, skip: false };
+      if (!files.length) return;
+      const cur = this._ensureReportGroups(qi);
+      if (!cur.groups[gi]) return;
+      const list = (cur.groups[gi].files || []).slice();
+      for (const f of files) list.push({ name: f.name, size: f.size, _file: f });
+      cur.groups[gi].files = list;
+      this.formAnswers[qi] = { ...cur, skip: false };
       e.target.value = '';
     },
 
-    removeReportFile(qi, fi) {
-      const cur = this.formAnswers[qi] || {};
-      const list = (cur.files || []).slice();
+    removeReportGroupFile(qi, gi, fi) {
+      const cur = this._ensureReportGroups(qi);
+      if (!cur.groups[gi]) return;
+      const list = (cur.groups[gi].files || []).slice();
       list.splice(fi, 1);
-      this.formAnswers[qi] = { ...cur, files: list };
+      cur.groups[gi].files = list;
+      this.formAnswers[qi] = { ...cur };
     },
 
     async submitForm() {
       if (this.thinking || !this.pendingForm) return;
+
+      // X4: 检测 form 是否为 report_upload(①.5 单 question form) → 走真传分支
+      // 当前 backend 单点维护 INITIAL_REPORT_UPLOAD_PROMPT,所以"全 report_upload" = "首诊上传"
+      const qs = this.pendingForm.questions || [];
+      const isReportUploadForm = qs.length > 0 && qs.every(q => q.type === 'report_upload');
+      if (isReportUploadForm) {
+        await this._submitReportUploadForm();
+        return;
+      }
+
       const payload = this._serializeFormAnswers();
       if (!payload) {
         this.apiError = '请至少回答一项后再提交';
@@ -708,6 +785,71 @@ function app() {
       this.apiError = '';
       this.$nextTick(() => this.scrollBottom());
       await this._postDiagnose({ session_id: this.sessionId, followup_answer: payload });
+    },
+
+    async _submitReportUploadForm() {
+      // X4 真传通路:逐 group 逐文件 POST /diagnose/upload → 拿 file_ref,
+      // 组装 exam_results 走 /diagnose(SSE)。空 group / skip → exam_results=[] 后端 ①.5 走 PG fallback
+      const qs = this.pendingForm.questions || [];
+      // 通常只有 1 个 question(INITIAL_REPORT_UPLOAD_PROMPT 单点)
+      const summaryLines = [];
+      const examResults = [];
+
+      this.thinking = true;
+      this.apiError = '';
+
+      try {
+        for (let qi = 0; qi < qs.length; qi++) {
+          const a = this.formAnswers[qi];
+          // 跳过分支:explicit skip 或没传任何文件
+          const groups = (a?.groups || []).filter(g => (g.files || []).length > 0);
+          if (a?.skip || groups.length === 0) {
+            summaryLines.push(`${this._labelForQuestion(qs[qi])}:无`);
+            continue;
+          }
+          // 上传分支:逐 group 逐文件传
+          for (let gi = 0; gi < groups.length; gi++) {
+            const g = groups[gi];
+            const label = (g.label || '').trim() || `报告${gi + 1}`;
+            const fileRefs = [];
+            for (const f of g.files) {
+              if (!f._file) continue;
+              const fd = new FormData();
+              fd.append('session_id', this.sessionId);
+              fd.append('file', f._file);
+              const res = await fetch('/diagnose/upload', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${this.token}` },
+                body: fd,
+              });
+              if (res.status === 401) { this.logout(); return; }
+              if (!res.ok) {
+                const eb = await res.json().catch(() => ({}));
+                throw new Error(eb.detail || `上传失败 (${res.status})`);
+              }
+              const data = await res.json();
+              fileRefs.push(data.file_ref);
+            }
+            examResults.push({ group_label: label, files: fileRefs, status: 'uploaded' });
+            summaryLines.push(`${label}(${fileRefs.length} 个文件)`);
+          }
+        }
+
+        // 聊天回显
+        const msgText = examResults.length
+          ? `已上传 ${examResults.length} 份报告 — ${summaryLines.join('、')}`
+          : (summaryLines.join('\n') || '无,跳过');
+        this.messages.push({ role: 'user', text: msgText });
+
+        // 清空 form 状态 + 进入下一轮
+        this.pendingForm = null;
+        this.formAnswers = {};
+        this.$nextTick(() => this.scrollBottom());
+        await this._postDiagnose({ session_id: this.sessionId, exam_results: examResults });
+      } catch (err) {
+        this.apiError = err.message || '上传报告失败';
+        this.thinking = false;
+      }
     },
 
     async send() {

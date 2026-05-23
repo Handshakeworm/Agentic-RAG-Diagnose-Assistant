@@ -693,11 +693,11 @@ Milvus 写入失败时，**不回滚** PostgreSQL 中已写入的 chunk 元数�
 2. Sparse 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造):`sparse_queries` 由 state 多字段直采,每条作一次独立 BM25 查询(strip 后长度 ≥ 2 过滤、保序去重):
    - **来源 A(state 结构化字段直采)**:
      - `chief_complaint`(顶层主诉)
-     - `present_illness_slots` 单值字段:`trigger` / `location` / `nature` / `severity` / `duration_pattern` / `onset_mode`(每条独立成袋)
-     - `present_illness_slots` list 字段:`associated_symptoms` / `aggravating` / `relieving`(每个元素独立成袋)
+     - `present_illness_slots` 单值字段:`location` / `duration_pattern` / `onset_mode`(每条独立成袋)
+     - `present_illness_slots` list 字段:`associated_symptoms` / `aggravating` / `relieving` / `trigger` / `nature` / `severity`(每个元素独立成袋;2026-05-22:trigger/nature/severity 从单值改 list[str])
    - **来源 B(report 语义信号直入)**:`report_findings` 的 `positive_findings` 每条 + `impressions` 每条作为独立 BM25 词袋(已是医学文献语言,无需 EL 归一化)。这类教材高频鉴别词(如"瞳孔散大"、"右额颞线形骨折")通过 sparse 路直接召回相关 chunk,不再仅靠 Dense LLM 单点综合。
      - **阴性过滤**:`impressions` 中含 `(-)` / `正常` / `阴性` / `未见` / `无异常` 字样的整条跳过(BM25 不懂否定,反向贡献)。`abnormal_values` 原始数值与 `negative_findings` 同样不进 query。
-   - **不入 sparse 的字段(理由扎实)**:`present_illness`(200+ 字必然 OR 退化)/ `treatment_tried`(拉到药学 chunk 不是诊断 chunk)/ `treatment_response`(全是"好转/无效"结论性词,无 IDF)/ `onset_time`("3 天前" KB 教材不写相对时间)/ `progression`(实测只 3 个泛词)
+   - **不入 sparse 的字段(理由扎实)**:`present_illness`(200+ 字必然 OR 退化)/ `treatments`(2026-05-22 合并自旧 treatment_tried + treatment_response,半结构化"<药>: <反应>",拉到药学 chunk 不是诊断 chunk + 反应词无 IDF)/ `onset_time`("3 天前" KB 教材不写相对时间)/ `progression`(实测只 3 个泛词)
    - **实测数量**:62 case 平均 21.8 条 sparse(case 001 简单 16 条 / case 062 复杂报告 28 条)
    - **不用 EL alias 反查**(EL 整层下线,terms_collection 数据保留但运行时不查;详见 §4.1.6.2 + EL_DESIGN_REVIEW §11)
 

@@ -21,7 +21,11 @@ class DiagnoseRequest(BaseModel):
 
     首次问诊:`session_id=None, patient_input="<主诉>"`
     回答追问:`session_id=<上次返回的>, followup_answer="<回答>"`
-    回传检查报告:`session_id=<...>, exam_results=[{"file_ref": "<路径>"}, ...]`
+    回传检查报告:`session_id=<...>, exam_results=[{group_label, files, status}, ...]`
+      —— 同一字段服务两个 interrupt 节点:
+        a) ①.5 analyze_initial_reports 首诊上传(2026-05-23 X4 起真传后端)
+        b) ⑧b wait_exam_report 推荐检查后回传
+      LangGraph 按 snapshot.next 自然喂给对应节点。跳过 = `exam_results=[]`
     """
 
     session_id: str | None = Field(None, description="首次为空,后端建 sessions 行后回传")
@@ -36,10 +40,14 @@ class DiagnoseRequest(BaseModel):
     exam_results: list[dict[str, Any]] | None = Field(
         None,
         description=(
-            "线下检查报告回传,2026-05-22 改为**按 group 分组**格式:"
-            "每项 `{group_label: str, files: list[str], status: 'uploaded'|'skipped'}`,"
-            "对应 ⑧a 推荐的每组。files 是 /diagnose/upload 落盘后返回的 file_ref 路径。"
-            "status='skipped' 表示患者未做该组,⑨ 跳过解析。"
+            "线下检查报告回传,**按 group 分组**格式(2026-05-22 X3 起):"
+            "每项 `{group_label: str, files: list[str], status: 'uploaded'|'skipped'}`。"
+            "files 是 /diagnose/upload 落盘后返回的 file_ref 路径列表。"
+            "status='skipped' 表示患者未做该组,①.5/⑨ 跳过解析。"
+            "**两个 interrupt 节点共享此字段**(2026-05-23 X4):"
+            "①.5 analyze_initial_reports 首诊上传(group_label = 患者自填标签 / 空 fallback '报告N')、"
+            "⑧b wait_exam_report 推荐检查回传(group_label = ⑧a 推荐的组名)。"
+            "LangGraph 按 snapshot.next 决定喂给哪个节点。跳过 = `exam_results=[]`。"
         ),
     )
 

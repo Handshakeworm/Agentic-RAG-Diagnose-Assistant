@@ -220,7 +220,7 @@ Schema 字段一旦上线即进入两个长生命周期消费路径，**不允�
 
 | 调用点 | Schema | 关键字段 | 安全等级 | 失败处理 |
 |-------|--------|---------|---------|---------|
-| ① `info_collect` Step 1 | `InfoCollectOutput` | `chief_complaint: str`, `present_illness: str`, `present_illness_slots: dict`（13 个维度槽位，未提及维度为 None/空列表） | 中 | 最多尝试 3 次；仍失败则抛异常终止会话（无主诉无法继续） |
+| ① `info_collect` Step 1 | `InfoCollectOutput` | `chief_complaint: str`, `present_illness: str`, `present_illness_slots: dict`（12 个维度槽位，未提及维度为 None/空列表） | 中 | 最多尝试 3 次；仍失败则抛异常终止会话（无主诉无法继续） |
 | ①.5 `analyze_initial_reports` / ⑨ `process_exam_result` | `ReportFindings` | `findings: list[ReportFinding]`；每项含 `report_type: str`, `abnormal_values: list[str]`, `impressions: list[str]`, `positive_findings: list[str]`, `negative_findings: list[str]` | 中 | 最多尝试 3 次；仍失败则该份报告标记解析失败，`report_findings` 不追加该项，流水线继续（降级为无该报告证据） |
 | ② `build_query` Step 1 NER | `NERResult` | `entities: list[NEREntity]`;每项含 `text: str`, `entity_type: Literal["symptom","disease","drug","anatomy"]`, `negation: bool`, `temporality: Literal["current","past","family"]`, `value: str｜None` | 中 | 最多尝试 3 次;仍失败则抛异常 |
 | ② `build_query` Step 3 Query 构建 | `QueryConstructionOutput` | `dense_query: str`(单字段;sparse_queries 由 Step 2 确定性产出,不进 LLM 输出) | 中 | 最多尝试 3 次;仍失败则抛异常 |
@@ -279,20 +279,19 @@ Schema 字段一旦上线即进入两个长生命周期消费路径，**不允�
 ```python
 # —— 子模型：被 InfoCollectOutput.present_illness_slots 引用 ——
 class PresentIllnessSlots(BaseModel):
-    """现病史结构化要素槽位（13 个维度），未提及的维度为 None/空列表"""
+    """现病史结构化要素槽位（12 个维度），未提及的维度为 None/空列表"""
     onset_time:          str | None = Field(None, description="起病时间，如'3天前'")
     onset_mode:          str | None = Field(None, description="起病方式：急性/缓慢/隐匿")
-    trigger:             str | None = Field(None, description="诱因：劳累/受凉/进食/无明显诱因")
+    trigger:             list[str] = Field(default_factory=list, description="诱因（多值）：劳累/受凉/进食/熬夜等可叠加")
     location:            str | None = Field(None, description="部位")
-    nature:              str | None = Field(None, description="性质：刺痛/胀痛/绞痛/烧灼感")
-    severity:            str | None = Field(None, description="程度：轻/中/重/VAS评分")
+    nature:              list[str] = Field(default_factory=list, description="性质（多值）：刺痛/胀痛/绞痛/烧灼感可同时存在")
+    severity:            list[str] = Field(default_factory=list, description="程度（多值）：主观描述+0-10 NRS 评分可叠加，如['影响睡眠','7-8 分']")
     duration_pattern:    str | None = Field(None, description="时间规律：持续性/间歇性/阵发性")
     aggravating:         list[str] = Field(default_factory=list, description="加重因素")
     relieving:           list[str] = Field(default_factory=list, description="缓解因素")
     associated_symptoms: list[str] = Field(default_factory=list, description="伴随症状（患者自述）")
     progression:         str | None = Field(None, description="病程演变：加重/减轻/稳定/波动")
-    treatment_tried:     str | None = Field(None, description="诊疗经过：看过没、用过什么药")
-    treatment_response:  str | None = Field(None, description="治疗反应：有效/无效/加重")
+    treatments:          list[str] = Field(default_factory=list, description="诊疗经过（多值，半结构化）：每条 '<治疗>: <反应>'，如 ['布洛芬: 无效', '热敷: 部分缓解']")
 
 # —— 主模型：传给 llm.with_structured_output() ——
 class InfoCollectOutput(BaseModel):
@@ -377,9 +376,9 @@ class QueryConstructionOutput(BaseModel):
 class FollowupQuestion(BaseModel):
     """④ select_symptom 单条追问项。"""
     type: Literal["slot", "open"] = Field(...,
-        description="slot=补全 13 维 HPI 空槽;open=开放式问'还有别的不舒服吗'")
+        description="slot=补全 12 维 HPI 空槽;open=开放式问'还有别的不舒服吗'")
     slot: str | None = Field(None,
-        description="type=slot 时填,如 'trigger' / 'location' / 'nature' 等 13 维槽位名;type=open 时为 None")
+        description="type=slot 时填,如 'trigger' / 'location' / 'nature' 等 12 维槽位名;type=open 时为 None")
 
 # —— 子模型:被 SmartFollowupOutput.unaskable_symptoms / DiagnosisOutput.retained_unaskable 引用 ——
 class UnaskableSymptom(BaseModel):
@@ -395,7 +394,7 @@ class UnaskableSymptom(BaseModel):
 class SmartFollowupOutput(BaseModel):
     """④ select_symptom LLM 输出 — 1 次调用同时出 2 件事。
 
-    LLM 输入 patient state(主诉 + 13 维 slots 空缺 + 已问症状),输出:
+    LLM 输入 patient state(主诉 + 12 维 slots 空缺 + 已问症状),输出:
     - questions:追问项(slot 维度补全 / open 开放式),≤ MAX_FOLLOWUP_QUESTIONS,可为 0
     - unaskable_symptoms:想知道但患者答不上的体征粗筛(后续 ⑩ Step 3 会精筛覆盖)
 
