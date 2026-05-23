@@ -15,11 +15,12 @@ from __future__ import annotations
 import pytest
 
 
-def test_create_initial_state_returns_all_35_fields() -> None:
-    """§4.1.1 字段清单完整性 — 35 个字段一个不能少。
+def test_create_initial_state_returns_all_36_fields() -> None:
+    """§4.1.1 字段清单完整性 — 36 个字段一个不能少。
 
     2026-05-21 followup_source 字段移除(⑦ 后路由分流改用 candidate_chunks 隐含信号,
     避免在 state 里加元数据字段);36 → 35。
+    2026-05-22 recommended_test_groups 加入(⑧a 写,⑧b/⑨ 消费);35 → 36。
     """
     from src.agent.state import MedicalState, create_initial_state
 
@@ -45,8 +46,10 @@ def test_create_initial_state_returns_all_35_fields() -> None:
         "diagnosis_result",
         # 安全约束
         "safety_constraints",
-        # 建议输出
-        "recommended_tests", "medication_advice", "risk_warnings", "final_response",
+        # 建议输出(recommended_test_groups 2026-05-22 新增,⑧a 写分组结构;
+        # recommended_tests 保留给 ⑫ 写扁平自然语言建议)
+        "recommended_test_groups", "recommended_tests",
+        "medication_advice", "risk_warnings", "final_response",
         # 审计埋点(§9.6)
         "last_reranked_chunks", "session_token_usage", "session_latency_ms",
         "last_diagnose_prompt", "last_diagnose_raw_output",
@@ -56,7 +59,7 @@ def test_create_initial_state_returns_all_35_fields() -> None:
     extra = actual_fields - expected_fields
     assert not missing, f"缺失字段: {missing}"
     assert not extra, f"多余字段: {extra}"
-    assert len(actual_fields) == 35
+    assert len(actual_fields) == 36
 
 
 def test_caller_required_fields_passed_through() -> None:

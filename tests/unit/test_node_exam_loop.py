@@ -25,8 +25,14 @@ def test_recommend_exam_differential_mode_when_diagnosis_present(mock_llm_factor
         .with_structured_output.return_value
         .with_retry.return_value
     )
+    # 2026-05-22:输出从 tests: list[str] 改为 test_groups: list[ExamGroup]
+    from src.agent.schemas.recommend_exam import ExamGroup
     mock_chain.invoke.return_value = RecommendExamOutput(
-        tests=["腹部超声", "胃镜", "腹部超声"],  # 重复项验证去重
+        test_groups=[
+            ExamGroup(group_label="腹部 B 超", items=["腹部超声"], note=""),
+            ExamGroup(group_label="胃镜", items=["胃镜"], note=""),
+            ExamGroup(group_label="腹部 B 超", items=["腹部超声"], note=""),  # 重名 → 去重
+        ],
         rationale="腹部超声优先,可区分胆囊炎;胃镜可确认溃疡",
     )
     mock_build.return_value = "mocked-prompt"
@@ -37,8 +43,10 @@ def test_recommend_exam_differential_mode_when_diagnosis_present(mock_llm_factor
     ]
     update = recommend_exam(s)
     assert update["exam_round"] == 1
-    # spec §4.1.1 字段定义:list[str] 每项一个检查名,不允许整段塞单元素
-    assert update["recommended_tests"] == ["腹部超声", "胃镜"]
+    # spec §9.5:recommended_test_groups list[dict],group_label 去重
+    groups = update["recommended_test_groups"]
+    assert [g["group_label"] for g in groups] == ["腹部 B 超", "胃镜"]
+    assert groups[0]["items"] == ["腹部超声"]
     # 验证 prompt 走鉴别模式
     assert mock_build.call_args.kwargs["mode"] == "differential"
 
@@ -54,8 +62,17 @@ def test_recommend_exam_intake_mode_when_no_diagnosis(mock_llm_factory, mock_bui
         .with_structured_output.return_value
         .with_retry.return_value
     )
+    # 2026-05-22:分组输出(抽血化验合一组;影像独立)
+    from src.agent.schemas.recommend_exam import ExamGroup
     mock_chain.invoke.return_value = RecommendExamOutput(
-        tests=["血常规", "腹部 B 超", "肝功能"],
+        test_groups=[
+            ExamGroup(
+                group_label="抽血化验(空腹8h)",
+                items=["血常规", "肝功能"],
+                note="一次抽血出多项",
+            ),
+            ExamGroup(group_label="腹部 B 超", items=["腹部 B 超"], note="需空腹 6-8h"),
+        ],
         rationale="腹痛首诊标准三件套",
     )
     mock_build.return_value = "mocked-prompt"
@@ -71,7 +88,10 @@ def test_recommend_exam_intake_mode_when_no_diagnosis(mock_llm_factory, mock_bui
 
     update = recommend_exam(s)
     assert update["exam_round"] == 1
-    assert update["recommended_tests"] == ["血常规", "腹部 B 超", "肝功能"]
+    groups = update["recommended_test_groups"]
+    assert [g["group_label"] for g in groups] == ["抽血化验(空腹8h)", "腹部 B 超"]
+    assert groups[0]["items"] == ["血常规", "肝功能"]
+    assert groups[0]["note"] == "一次抽血出多项"
     # 验证 prompt 走首诊模式 + 透传 unaskable_symptoms
     assert mock_build.call_args.kwargs["mode"] == "intake"
     assert mock_build.call_args.kwargs["unaskable_symptoms"] == [
@@ -90,11 +110,11 @@ def test_recommend_exam_empty_tests_yields_empty_list(mock_llm_factory):
         .with_structured_output.return_value
         .with_retry.return_value
     )
-    mock_chain.invoke.return_value = RecommendExamOutput(tests=[], rationale="已有报告全覆盖")
+    mock_chain.invoke.return_value = RecommendExamOutput(test_groups=[], rationale="已有报告全覆盖")
 
     s = create_initial_state(patient_id="P", patient_input="x")
     update = recommend_exam(s)
-    assert update["recommended_tests"] == []
+    assert update["recommended_test_groups"] == []
     assert update["exam_round"] == 1
 
 
@@ -105,12 +125,23 @@ def test_recommend_exam_empty_tests_yields_empty_list(mock_llm_factory):
 def test_wait_exam_report_calls_interrupt(mock_interrupt):
     from src.agent.nodes.wait_exam_report import wait_exam_report
 
-    mock_interrupt.return_value = [{"file_ref": "/tmp/lab.pdf"}]
+    # 2026-05-22:interrupt payload 改成 recommended_test_groups(分组结构)
+    mock_interrupt.return_value = [
+        {"group_label": "腹部 B 超", "files": ["/tmp/lab.pdf"], "status": "uploaded"},
+    ]
     s = create_initial_state(patient_id="P", patient_input="x")
-    s.recommended_tests = ["腹部超声"]
+    s.recommended_test_groups = [
+        {"group_label": "腹部 B 超", "items": ["腹部超声"], "note": ""},
+    ]
     update = wait_exam_report(s)
-    mock_interrupt.assert_called_once_with(["腹部超声"])
-    assert update == {"pending_exam_results": [{"file_ref": "/tmp/lab.pdf"}]}
+    mock_interrupt.assert_called_once_with(
+        [{"group_label": "腹部 B 超", "items": ["腹部超声"], "note": ""}]
+    )
+    assert update == {
+        "pending_exam_results": [
+            {"group_label": "腹部 B 超", "files": ["/tmp/lab.pdf"], "status": "uploaded"},
+        ]
+    }
 
 
 # ⑨ process_exam_result

@@ -7,7 +7,16 @@
   推针对性补漏
 
 **不再读 `candidate_chunks`** — 医学推理已在 ⑤/⑩ 完成,⑧a 只做"医生侧 description →
-患者友好文案 + 优先级排序",prompt 短延迟低。
+患者友好文案 + 按报告载体分组",prompt 短延迟低。
+
+2026-05-22 改造:
+- 输出从 `tests: list[str]` → `test_groups: list[ExamGroup]`,按报告载体分组
+  (抽血合 1 组 / 体格合 1 组 / 影像各自独立 / 心电图等独立),UI 据此给每组出
+  独立上传框,⑨ 解析时拿 group_label 作 hint
+- 模型从 pro → flash:任务本质是"翻译 + 整理 + 规则性分组",不需要 reasoner 深度;
+  flash 5-15s 完成(对比 pro ~55s),嵌套 schema 输出稳定(同 ⑤ Step A 经验)
+- state 写 `recommended_test_groups`(新字段),不再写 `recommended_tests`
+  (后者保留给 ⑫ generate_advice 写扁平自然语言建议,⑬ format_response 用)
 
 设计目的:首诊模式让 patient 第一轮就拿到该做的全套检查,做完回传后 ⑩ 大概率
 一次诊断结案;鉴别模式仅补漏,降低 ⑩ × 2 的概率。
@@ -19,6 +28,7 @@ from __future__ import annotations
 import logging
 import time
 
+from config.settings import settings
 from src.agent.schemas.recommend_exam import RecommendExamOutput
 from src.agent.state import MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
@@ -45,7 +55,10 @@ def recommend_exam(state: MedicalState) -> dict:
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(RecommendExamOutput, method="json_mode").with_retry(stop_after_attempt=3)
+        # 2026-05-22:pro → flash(任务本质翻译+整理+规则性分组,不需 reasoner 深度)
+        chain = get_llm(model=settings.llm.FAST_MODEL_NAME).with_structured_output(
+            RecommendExamOutput, method="json_mode"
+        ).with_retry(stop_after_attempt=3)
         result: RecommendExamOutput = chain.invoke(
             prompt,
             config={
@@ -62,24 +75,32 @@ def recommend_exam(state: MedicalState) -> dict:
     finally:
         elapsed = time.perf_counter() - t0
         _latency.labels(node=_NODE, schema=_SCHEMA).observe(elapsed)
-        _logger.info("[%s] elapsed=%.2fs", _NODE, elapsed)
+        _logger.info("[%s] flash elapsed=%.2fs", _NODE, elapsed)
 
-    # 去重保留顺序(LLM 偶尔会重复推荐;state 字段定义无重复语义)
-    tests_unique: list[str] = []
-    seen: set[str] = set()
-    for t in result.tests:
-        t_clean = (t or "").strip()
-        if t_clean and t_clean not in seen:
-            tests_unique.append(t_clean)
-            seen.add(t_clean)
+    # 去重保留顺序 + 兜底过滤(LLM 偶尔产空 group 或重名)
+    groups_clean: list[dict] = []
+    seen_labels: set[str] = set()
+    for g in result.test_groups:
+        label = (g.group_label or "").strip()
+        items = [i.strip() for i in (g.items or []) if i and i.strip()]
+        if not label or not items:
+            continue  # 跳过空 group
+        if label in seen_labels:
+            continue  # 跳过重名 group(LLM 偶发)
+        groups_clean.append({
+            "group_label": label,
+            "items": items,
+            "note": (g.note or "").strip(),
+        })
+        seen_labels.add(label)
 
-    # DEBUG remove: 看 ⑧a LLM 真实出口,定位 UI"建议检查清单为空" bug
+    # DEBUG remove: 看 ⑧a 分组输出,验证 flash 是否按规则分对
     _logger.info(
-        "[debug] ⑧a output: mode=%s raw_tests=%s tests_unique=%s rationale=%r",
-        mode, list(result.tests), tests_unique, result.rationale,
+        "[debug] ⑧a output: mode=%s groups=%s rationale=%r",
+        mode, groups_clean, result.rationale,
     )
 
     return {
-        "recommended_tests": tests_unique,
+        "recommended_test_groups": groups_clean,
         "exam_round": state.exam_round + 1,
     }

@@ -276,11 +276,13 @@ async def diagnose(
                         "pending_questions": list(state_dict.get("followup_questions") or []),
                     })
                 elif next_node == "wait_exam_report":
+                    # 2026-05-22:推 recommended_test_groups(分组 + UI 分框);
+                    # recommended_tests 留空(由 ⑫ generate_advice 写,⑬ format_response 用)
                     yield _sse({
                         "event": "interrupt",
                         "session_id": session_id,
                         "status": "ongoing_exam",
-                        "recommended_tests": list(state_dict.get("recommended_tests") or []),
+                        "recommended_test_groups": list(state_dict.get("recommended_test_groups") or []),
                     })
                 elif next_node == "analyze_initial_reports":
                     # ①.5 节点内 interrupt:问"要不要上传报告"。payload 文案见

@@ -62,11 +62,21 @@ class DiagnoseResponse(BaseModel):
             "status='ongoing_followup' 时非空,前端可选用;后端 ⑦ 仍按 followup_answer 文本解析。"
         ),
     )
+    recommended_test_groups: list[dict[str, Any]] | None = Field(
+        None,
+        description=(
+            "2026-05-22:推荐检查的**分组**结构(替代旧 recommended_tests)。"
+            "status='ongoing_exam' 时非空,前端按 group 渲染独立上传框。"
+            "每项 dict 形态 {group_label: str, items: list[str], note: str},"
+            "见 src/agent/schemas/recommend_exam.py:ExamGroup。"
+        ),
+    )
     recommended_tests: list[str] | None = Field(
         None,
         description=(
-            "建议的线下检查项目列表。status='ongoing_exam' 时非空,"
-            "前端引导用户去医院做检查后调本接口回传 exam_results"
+            "扁平自然语言检查建议(由 ⑫ generate_advice 写,⑬ format_response 拼最终回复用)。"
+            "在 completed 状态返回。**不要**用于 ongoing_exam 引导用户上传 — 那是 "
+            "recommended_test_groups 的职责。"
         ),
     )
 

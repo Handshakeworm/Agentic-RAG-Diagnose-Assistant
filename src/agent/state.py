@@ -149,6 +149,9 @@ class MedicalState(BaseModel):
     safety_constraints: dict = Field(default_factory=dict)
 
     # === 建议输出 ===
+    # 2026-05-22:recommended_test_groups 给 ⑧a 写(分组结构,⑧b/⑨ 消费);
+    #   recommended_tests 给 ⑫ generate_advice 写(扁平自然语言,⑬ format_response 用)
+    recommended_test_groups: list[dict] = Field(default_factory=list)
     recommended_tests: list[str] = Field(default_factory=list)
     medication_advice: list[dict] = Field(default_factory=list)
     risk_warnings: list[str] = Field(default_factory=list)

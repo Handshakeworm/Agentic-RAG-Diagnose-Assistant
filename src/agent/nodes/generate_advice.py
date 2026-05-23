@@ -110,8 +110,16 @@ def generate_advice(state: MedicalState) -> dict:
     if note and note not in risk_warnings:
         risk_warnings.append(note)
 
+    # exam_suggestions fallback:⑫ LLM 没出 → 从 ⑧a 的 test_groups flatten 出 group_label
+    # (2026-05-22:state.recommended_tests 不再由 ⑧a 写,改由 ⑧a 写 recommended_test_groups)
+    fallback_tests: list[str] = []
+    for g in state.recommended_test_groups:
+        label = (g.get("group_label") or "").strip()
+        if label:
+            fallback_tests.append(label)
+
     return {
         "medication_advice": [m.model_dump() for m in result.medications],
-        "recommended_tests": result.exam_suggestions or list(state.recommended_tests),
+        "recommended_tests": result.exam_suggestions or fallback_tests,
         "risk_warnings": risk_warnings,
     }

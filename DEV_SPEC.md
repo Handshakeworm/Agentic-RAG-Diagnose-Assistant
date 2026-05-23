@@ -2030,7 +2030,8 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     # - contraindication_flags: dict     # 禁忌标记（妊娠分级、哺乳禁忌等）
 
     # === 建议输出 ===
-    recommended_tests: list[str]         # 建议检查项目
+    recommended_test_groups: list[dict]  # 2026-05-22 新:⑧a 写,分组结构 {group_label, items, note};供 UI 按 group 渲染独立上传框 + ⑨ 解析 hint
+    recommended_tests: list[str]         # 扁平自然语言建议(⑫ generate_advice 写,⑬ format_response 用;不再由 ⑧a 写)
     medication_advice: list[dict]        # 用药建议（已通过 safety_constraints 过滤）
     risk_warnings: list[str]            # 高危提示
     final_response: str                  # 最终输出给用户的回复
@@ -2076,7 +2077,8 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
 | | `pending_exam_results` | `list` | `[]` | `wait_exam_report` ⑧b 写入（interrupt 返回的用户回传检查结果）；`process_exam_result` ⑨ 消费后解析入 `exam_reports` / `report_findings` |
 | | `diagnosis_result` | `list[dict]` | `[]` | `diagnose` ⑩ 填充 |
 | | `safety_constraints` | `dict` | `{}` | `safety_gate` ⑪ 填充 |
-| | `recommended_tests` | `list[str]` | `[]` | `recommend_exam` ⑧a / `generate_advice` ⑫ 填充 |
+| | `recommended_test_groups` | `list[dict]` | `[]` | `recommend_exam` ⑧a 写(2026-05-22 新),`[{group_label, items, note}, ...]`,⑧b interrupt 推前端按 group 分框 |
+| | `recommended_tests` | `list[str]` | `[]` | `generate_advice` ⑫ 填充扁平自然语言建议(⑬ format_response 用) |
 | | `medication_advice` | `list[dict]` | `[]` | `generate_advice` ⑫ 填充 |
 | | `risk_warnings` | `list[str]` | `[]` | `generate_advice` ⑫ 填充 |
 | | `final_response` | `str` | `""` | `format_response` ⑬ 填充 |
@@ -2438,26 +2440,28 @@ result = graph.invoke(initial_state, config=config)
 
 > **拆分设计**：与追问节点同理，LLM 生成检查建议与 `interrupt` 等待结果分属两个节点，避免恢复时重复调用 LLM。
 
-**⑧a `recommend_exam`** — 双模式(看 `diagnosis_result` 是否非空切):
+**⑧a `recommend_exam`** — 双模式(看 `diagnosis_result` 是否非空切),**2026-05-22 pro → flash + 输出分组化**:
 - **触发**(两条入口):
   1. **首诊模式**(⑤ 触发,`diagnosis_result` 为空):⑤ 写了 `unaskable_symptoms` 但没诊断过 → 直接基于 unaskable + 主诉/HPI 推首诊全套
   2. **鉴别模式**(⑩ 后 `need_exam`,`diagnosis_result` 非空):基于候选 + `retained_unaskable` 推针对性鉴别补漏
 - **输入**: `chief_complaint`, `present_illness`, `unaskable_symptoms`, `report_findings`, `exam_round`, `diagnosis_result`(空 = 首诊模式)
-  - **不再读 `candidate_chunks`** — ⑤ 已经做了"该查什么"的决策,⑧a 不重做检索/医学知识推理,只做"医生侧 description → 患者友好检查清单 + 文案 + 排序",prompt 短延迟低
+  - **不再读 `candidate_chunks`** — ⑤ 已经做了"该查什么"的决策,⑧a 不重做检索/医学知识推理,只做"医生侧 description → 患者友好检查清单 + **按报告载体分组** + 排序"
+- **模型**:`settings.llm.FAST_MODEL_NAME`(flash,2026-05-22 从 pro 切;任务本质翻译+整理+规则性分组,不需 reasoner 深度;flash 5-15s vs pro ~55s)
 - **职责**:
   - `exam_round += 1`
   - LLM 输入 `unaskable_symptoms`(主源)+ 当前模式对应的语境信号:
     - 首诊模式:主诉 + HPI(决定"为鉴别什么类病需要哪些检查")
     - 鉴别模式:`diagnosis_result` 候选 + `retained_unaskable`(决定"为区分 A vs B 还差什么")
-  - 检查类型同前(体格 + 辅助),按优先级排序,**不静默排除已有报告**(对推荐里与 `report_findings` 交集的项加复用评估说明)
-  - 以患者可理解的语言输出 + 涉及禁食/造影剂等特殊条件写明
-- **输出**: 更新 `recommended_tests`, `exam_round`
-- **设计目的**:首诊模式让 patient **第一轮就拿到该做的全套检查**,做完回传后 ⑩ 大概率一次诊断结案;鉴别模式仅补漏,降低 ⑩ × 2 的概率。
+  - **按"医院实际出报告的载体"分组**(4 大类:抽血化验合 1 组 / 体格检查合 1 组 / 影像各自独立 / 心电图等独立),典型 2-5 组
+  - **不静默排除已有报告**(对推荐里与 `report_findings` 交集的项加复用评估说明到 note)
+  - 以患者可理解的语言输出 + 涉及禁食/造影剂等特殊条件写到 note
+- **输出**: 更新 `recommended_test_groups`(`list[{group_label, items, note}]`), `exam_round`;**不再写 `recommended_tests`**(后者保留给 ⑫ 写扁平自然语言)
+- **设计目的**:首诊模式让 patient **第一轮就拿到该做的全套检查**,做完回传后 ⑩ 大概率一次诊断结案;鉴别模式仅补漏,降低 ⑩ × 2 的概率。**分组让 UI 给每组出独立上传框**,患者知道哪个文件传哪儿,⑨ 解析时拿 group_label 作 hint 提升准确度。
 
-**⑧b `wait_exam_report`**：
-- **输入**: `recommended_tests`（由 ⑧a 写入 State）
-- **职责**: 调用 `interrupt(state["recommended_tests"])` 暂停执行，等待患者线下就医检查后回传结果（医生体格检查结论/检查报告，图片/PDF/文字描述均可；患者可只做部分检查）
-- **输出**: 更新 `pending_exam_results`（用户回传的检查结果原始数据，供 ⑨ 处理）
+**⑧b `wait_exam_report`**(2026-05-22 interrupt payload 改成分组结构):
+- **输入**: `recommended_test_groups`(由 ⑧a 写入 State)
+- **职责**: 调用 `interrupt(state["recommended_test_groups"])` 暂停执行,等待患者按 group 上传报告(图片/PDF;前端按 group 出独立上传框,允许跳过)
+- **输出**: 更新 `pending_exam_results`(每项 `{group_label, files: list[str], status: "uploaded"|"skipped"}`,供 ⑨ 处理)
 
 ##### ⑨ `process_exam_result` — 处理检查结果回传
 - **输入**: `pending_exam_results`（由 ⑧b 写入 State，用户上传的检查结果——体格检查结论 或 辅助检查报告，可能是多项；**已是落盘后的 file_ref 引用**，原始文件落盘由 API 层在 ⑧b interrupt resume 时完成，见下方"落盘责任划分"段）
