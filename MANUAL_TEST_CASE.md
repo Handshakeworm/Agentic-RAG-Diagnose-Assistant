@@ -133,7 +133,7 @@
 
 #### 第 1 轮 ⑤ — 鉴别要点(发热量化 + 黄疸 + 既往 + 家族史)
 
-`askable_targets` 通常包含:`fever_max_temp` / `jaundice_eyes_skin` / `similar_episode_history` / `family_gallstones`。
+`askable_targets` 通常包含:`发烧最高温度` / `皮肤巩膜黄染` / `既往类似腹痛史` / `胆石家族史`(2026-05-22 改中文短语后)。
 对应问句(Step B 拼出来):
 
 | 题 | 你输入 |
@@ -148,7 +148,7 @@
 
 #### 第 2 轮 ⑤ — 梗阻黄疸排除 + 胆囊典型放射 + 疼痛量化
 
-`askable_targets` 通常包含:`stool_color` / `urine_color` / `radiation_to_right_shoulder` / `pain_score_numeric`。
+`askable_targets` 通常包含:`大便颜色变浅` / `小便颜色加深` / `疼痛放射到右肩` / `疼痛 NRS 评分`。
 
 | 题 | 你输入 | 临床用意 |
 |---|---|---|

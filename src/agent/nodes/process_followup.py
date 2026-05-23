@@ -17,6 +17,7 @@ flash 非 thinking,1-3 秒结束;参考 info_collect 用 flash 跑同类任务�
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from config.settings import settings
@@ -122,18 +123,44 @@ def _merge_obstetric_fills(
     return new_hist
 
 
+_FAMILY_ENTRY_RE = re.compile(
+    r"^\s*(?P<relation>[^:：]+?)\s*[:：]\s*(?P<condition>.+?)"
+    r"(?:\s*[(（]\s*(?:发病)?\s*(?P<onset_age>\d+)\s*岁?\s*[)）])?\s*$"
+)
+
+
+def _parse_history_entry(raw: str) -> tuple[str, str | None]:
+    """切 'X:Y' 半结构化字符串。返回 (左, 右|None)。失败 → ("", None)。
+
+    覆盖全角/半角冒号;LLM 漂格式时尽量保留;失败兜底由调用方处理(保留原文 notes)。
+    """
+    if not raw or not isinstance(raw, str):
+        return "", None
+    for sep in (":", ":"):
+        if sep in raw:
+            left, _, right = raw.partition(sep)
+            return left.strip(), (right.strip() or None)
+    return raw.strip(), None
+
+
 def _merge_history_fills(
     medical_history: dict, fills: dict[str, list[str]] | None
 ) -> dict:
-    """把 history_fills 三段扁平 list 追加到 medical_history 对应表(allergy / medication / past)。
+    """把 history_fills 5 段 list 追加到 medical_history 对应位置。
 
-    字段映射对齐 `patient_repo.load_medical_history` 返回结构:
+    字段映射对齐 `patient_repo.load_medical_history` 返回结构 + 2026-05-22 新增 2 段:
       - allergies        → allergy_history[].substance
       - medications      → medication_history[].drug_name(is_current=True)
       - past_conditions  → past_history.medical_history[].condition
+      - family_conditions(新):
+          '<关系>:<疾病>[(发病<年龄>岁)]' 阳性 → family_history[].{relation, condition, onset_age, notes}
+          '<疾病>:无' 已问无       → family_history_asked_no[](疾病名 dedup 追加)
+      - personal_conditions(新):
+          '<项目>:<详细>' 有内容    → personal_history.dynamic_notes[](原文 dedup 追加)
+          '<项目>:无' 已问无        → personal_history_asked_no[](项目名 dedup 追加)
 
-    幂等:已存在的同名条目跳过(用 substance / drug_name / condition 主键比对)。
-    fills 为 None → 透传;某段 list 为空 → 表示"已问无答",不追加但视为已询问。
+    解析失败兜底:阳性 entry 失败 → 整段塞 notes 字段(沉淀节点未来再处理),不丢数据。
+    幂等:同名条目跳过。fills 为 None → 透传;某段缺省 = 本轮无史类问询。
     """
     if fills is None:
         return medical_history
@@ -173,6 +200,77 @@ def _merge_history_fills(
                 seen.add(name)
         past_section["medical_history"] = past_list
         new_hist["past_history"] = past_section
+
+    # 家族史 — 阳性 entry 入 family_history,'<疾病>:无' 入 family_history_asked_no
+    family_new = fills.get("family_conditions") or []
+    if family_new:
+        family_list = list(new_hist.get("family_history") or [])
+        asked_no_list = list(new_hist.get("family_history_asked_no") or [])
+        seen_positive = {  # (relation, condition) 双键去重
+            (r.get("relation"), r.get("condition"))
+            for r in family_list if r.get("relation") and r.get("condition")
+        }
+        seen_asked_no = set(asked_no_list)
+        for raw in family_new:
+            left, right = _parse_history_entry(raw)
+            if not left:
+                continue  # 整段空白,跳过
+            # 形如 "胆结石:无" → 已问无的疾病范畴
+            if right and right.strip() in ("无", "没有", "否"):
+                if left not in seen_asked_no:
+                    asked_no_list.append(left)
+                    seen_asked_no.add(left)
+                continue
+            # 形如 "父亲:糖尿病(发病50岁)" → 阳性 entry
+            m = _FAMILY_ENTRY_RE.match(raw)
+            if m:
+                relation = m.group("relation").strip()
+                condition = m.group("condition").strip()
+                onset_age = int(m.group("onset_age")) if m.group("onset_age") else None
+                key = (relation, condition)
+                if key not in seen_positive:
+                    family_list.append({
+                        "relation": relation,
+                        "condition": condition,
+                        "onset_age": onset_age,
+                        "notes": raw,  # 保留原文给沉淀节点
+                    })
+                    seen_positive.add(key)
+            else:
+                # 解析失败 — 保留整段到 notes(沉淀节点未来用 LLM 再解析)
+                family_list.append({
+                    "relation": None,
+                    "condition": None,
+                    "onset_age": None,
+                    "notes": raw,
+                })
+        new_hist["family_history"] = family_list
+        new_hist["family_history_asked_no"] = asked_no_list
+
+    # 个人史 — 有内容入 dynamic_notes,'<项目>:无' 入 personal_history_asked_no
+    personal_new = fills.get("personal_conditions") or []
+    if personal_new:
+        personal_dict = dict(new_hist.get("personal_history") or {})
+        dynamic_notes = list(personal_dict.get("dynamic_notes") or [])
+        asked_no_list = list(new_hist.get("personal_history_asked_no") or [])
+        seen_notes = set(dynamic_notes)
+        seen_asked_no = set(asked_no_list)
+        for raw in personal_new:
+            if not raw or not isinstance(raw, str):
+                continue
+            left, right = _parse_history_entry(raw)
+            if right and right.strip() in ("无", "没有", "否"):
+                if left and left not in seen_asked_no:
+                    asked_no_list.append(left)
+                    seen_asked_no.add(left)
+            else:
+                # 有内容(含解析失败时整段当 note)→ append 原文
+                if raw not in seen_notes:
+                    dynamic_notes.append(raw)
+                    seen_notes.add(raw)
+        personal_dict["dynamic_notes"] = dynamic_notes
+        new_hist["personal_history"] = personal_dict
+        new_hist["personal_history_asked_no"] = asked_no_list
 
     return new_hist
 

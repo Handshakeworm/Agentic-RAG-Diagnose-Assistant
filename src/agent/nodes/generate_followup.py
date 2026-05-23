@@ -2,11 +2,12 @@
 
 **2 步 LLM,双 list 出口,检索前 holistic gate**(2026-05-21 拆分 / 2026-05-22 Step A 改 flash)。
 
-定位:进 ②③④ 检索/鉴别前的最后一道 holistic gate。intake 把 13 维 slot 灌完后,
+定位:进 ②③④ 检索/鉴别前的最后一道 holistic gate。intake 把 12 维 slot 灌完后,
 ⑤ 用 **2 次 LLM** 决策"还差什么信息",按"患者能不能答"分两路:
-  - Step A(flash):holistic 看全量 state 出 `askable_targets`(英文短标签)
+  - Step A(flash):holistic 看全量 state 出 `askable_targets`(**中文短语**,
+    2026-05-22 从英文 snake_case 改中文,跟 denied/confirmed 同语种直接对账去重)
     + `unaskable_findings`(医生侧 description + reason)
-  - Step B(flash,仅 askable_targets 非空才调):把短标签 → 患者侧自然中文问句
+  - Step B(flash,仅 askable_targets 非空才调):把中文短语 → 患者侧自然中文问句
 
 2026-05-22 改造:Step A 从 pro reasoner 改用 flash。原因:pro reasoner thinking
 45-180s 不稳定,且 reasoner + json_mode 嵌套 schema 偶发字段名飘 → with_retry ×
@@ -64,8 +65,12 @@ def _filled_slots(slots) -> dict:
 
 
 def _summarize_history(history: dict) -> str:
-    """档案 → 病史摘要文本。空 list 显示"已询问,无"(⓪a 入站必问过),不是"未询问",
-    防止 ⑤ LLM 把已问无的范畴再次列进 askable 重复追问。"""
+    """档案 → 病史摘要文本(给 ⑤ Step A 用,区分"已问无"vs"未询问"防重复)。
+
+    2026-05-22:6 段(过敏/用药/既往/婚育/家族/个人),家族 + 个人新增,
+    用 `medical_history.family_history_asked_no` 和 `personal_history_asked_no` 两个
+    list 字段判"已询问无"(不污染 family_history / personal_history 的真实阳性语义)。
+    """
     if not history:
         return "  (档案为空)"
     lines: list[str] = []
@@ -88,6 +93,42 @@ def _summarize_history(history: dict) -> str:
         lines.append(
             f"  - 妊娠/哺乳:{ob.get('pregnancy_status', '?')} / {ob.get('lactation_status', '?')}"
         )
+
+    # 家族史(2026-05-22):阳性 + 已问无 两路展示,⑤ Step A 据此去重避免重复追问
+    family_pos = history.get("family_history") or []
+    family_asked_no = history.get("family_history_asked_no") or []
+    family_bits: list[str] = []
+    if family_pos:
+        positive_strs = [
+            f"{r.get('relation', '亲属')}:{r.get('condition', '?')}"
+            + (f"(发病{r['onset_age']}岁)" if r.get("onset_age") else "")
+            for r in family_pos
+            if r.get("relation") or r.get("condition")  # 跳过纯空 entry
+        ]
+        if positive_strs:
+            family_bits.append("阳性:" + "; ".join(positive_strs))
+    if family_asked_no:
+        family_bits.append("已询问无:" + "、".join(family_asked_no))
+    family_line = " | ".join(family_bits) if family_bits else "(未询问)"
+    lines.append(f"  - 家族史:{family_line}")
+
+    # 个人史(2026-05-22):dynamic_notes(自由文本) + asked_no(已问无的项目名)
+    personal_dict = history.get("personal_history") or {}
+    personal_notes = personal_dict.get("dynamic_notes") or []
+    personal_asked_no = history.get("personal_history_asked_no") or []
+    personal_bits: list[str] = []
+    if personal_notes:
+        personal_bits.append("内容:" + "; ".join(personal_notes))
+    if personal_asked_no:
+        personal_bits.append("已询问无:" + "、".join(personal_asked_no))
+    # patient 表内嵌的精细字段(smoking_status 等)若非空也展示
+    if personal_dict.get("smoking_status"):
+        personal_bits.append(f"吸烟:{personal_dict['smoking_status']}")
+    if personal_dict.get("alcohol_status"):
+        personal_bits.append(f"饮酒:{personal_dict['alcohol_status']}")
+    personal_line = " | ".join(personal_bits) if personal_bits else "(未询问)"
+    lines.append(f"  - 个人史:{personal_line}")
+
     return "\n".join(lines)
 
 
@@ -175,6 +216,8 @@ def _llm_question_gen_flash(
         chief_complaint=state.chief_complaint,
         present_illness=state.present_illness,
         askable_targets=askable_targets,
+        confirmed_symptoms=list(state.confirmed_symptoms),
+        denied_symptoms=list(state.denied_symptoms),
     )
 
     _attempts.labels(node=_NODE, schema=_SCHEMA_STEP_B).inc()
@@ -204,10 +247,11 @@ def _llm_question_gen_flash(
             "[%s] Step B question gen failed, fallback to short labels: %s",
             _NODE, e,
         )
-        # 降级:用短标签拼朴素问句,不阻塞流程
+        # 降级:用中文短语拼朴素问句,不阻塞流程
+        # (2026-05-22:askable_target 已是中文短语,直接拼即可;不再 replace '_')
         return [
             TargetedFollowupItem(
-                question=f"请补充一下:{t.replace('_', ' ')}",
+                question=f"请补充一下:{t}",
                 target=t,
             )
             for t in askable_targets

@@ -360,16 +360,48 @@ def build_followup_parse_prompt(
    - **两个 key 都要出现**(即使 value 是 null),让下游知道"已问过"vs"没问过"
    - 不含妊娠/哺乳追问的本轮 → obstetric_fills 字段缺省(不写)"""
 
-    history_rule = ""
-    if has_history:
-        history_rule = """
-4. history_fills(本轮含病史采集追问时必填,三段扁平 list[str]):
-   - allergies:过敏原名("青霉素"/"海鲜"/"花粉"),不含反应描述
-   - medications:在用或长期服用药物名("氯沙坦"/"二甲双胍"),不含剂量
-   - past_conditions:既往疾病名("高血压"/"糖尿病"/"胆囊炎史"),不含日期
-   - 患者明确说"无"/"没有"→ 三段全部 [];若只回答了一部分,其余按"未提及"→ []
-   - **三个 key 都要出现**(即使是空 list),让下游知道"已问过"
-   - 不含病史采集追问的本轮 → history_fills 字段缺省(不写)"""
+    # history_rule:has_history(⓪a form 含 type=history 题)必启用;否则按需启用
+    # —— LLM 看 question 内容,涉及史类(比如家族史/平时烟酒/职业暴露/既往疾病/过敏/长期用药)
+    # 就填对应段。不涉及就整个 history_fills 缺省。
+    history_rule = """
+4. history_fills(**5 段** list[str],按 question 内容自动判断要填哪几段):
+
+   **何时填**:question 涉及"史"类信息,**比如**:
+   - "您以前有过 X 病吗?" / "曾经诊断过哪些慢性病?" → past_conditions(疾病史)
+   - "对什么过敏?" / "有药物过敏吗?" → allergies
+   - "平时在吃什么药?" / "长期服药情况?" → medications
+   - "您父母兄弟姐妹有人得过 X 吗?" / "家里有 X 病史吗?" → family_conditions
+   - "您平时喝酒/吸烟吗?" / "职业有没有粉尘暴露?" / "去过疫区吗?" → personal_conditions
+   - 问句**不涉及任何史**(如"现在哪里疼?")→ history_fills 整段缺省(不写)
+
+   **5 段格式**:
+   - allergies:过敏原名 list,如 ["青霉素", "海鲜"];问了无 → []
+   - medications:在用/长期药名 list,如 ["氯沙坦"];问了无 → []
+   - past_conditions:既往**疾病**名 list,如 ["高血压", "胆囊炎"];问了无 → []
+   - family_conditions(2026-05-22 新):半结构化 list[str]:
+       * 阳性:`"<关系>:<疾病>[(发病<年龄>岁)]"`,如 ["父亲:糖尿病(发病50岁)", "母亲:胆结石"]
+       * 已问无:`"<疾病>:无"`,如 ["胆结石:无", "心脏病:无"]
+       * 问了但全无 → 用 ["<问到的疾病>:无"] 表达,不要写 [](LLM 必须告诉下游问过什么)
+   - personal_conditions(2026-05-22 新):半结构化 list[str]:
+       * 有内容:`"<项目>:<详细>"`,如 ["吸烟:每天1包15年", "饮酒:偶尔啤酒", "职业:化工厂粉尘"]
+       * 已问无:`"<项目>:无"`,如 ["饮酒:无", "吸烟:无"]
+       * 问了但全无 → 同上,用 "<项目>:无" 表达
+
+   **重要 - 史 vs 近期事件 双填判断**:
+   一句话同时问"史"和"近期"时,**两段都要填**,不要二选一:
+   - 例 Q="您平时喝酒吗?最近有没有饮酒?" + A="无"
+     → history_fills.personal_conditions = ["饮酒:无"](平时 = 史)
+     → denied_symptoms 加 "近期饮酒"(最近 = 近期事件)
+   - 判断公式:
+     * 含"平时/以前/家族/父母/兄弟姐妹/曾经" → 史 → history_fills 对应段
+     * 含"最近/这次/现在/本次/这两天" → 近期 → confirmed/denied/uncertain
+     * 两者并列 → **双填,分别写两段**
+
+   **症状史 vs 疾病史**(常错):
+   - "以前有过类似 X 痛?"(X 是症状名)→ 这是症状的**反复发作史**
+     → denied_symptoms 加 "既往类似X痛",**不进 past_conditions**
+   - "以前得过 X 病?"(X 是疾病名)→ 这是**疾病史**
+     → past_conditions 加 "X",不进 denied_symptoms"""
 
     return f"""你是问诊回答解析助手。请把患者回答结构化。
 
@@ -419,10 +451,32 @@ def build_followup_parse_prompt(
         - 例 Q="您有没有打寒战?" + A="没有" → denied 加 "寒战"
         - 例 Q="皮肤或眼睛发黄?" + A="无" → denied 加 "皮肤黄染" 和 "巩膜黄染"
         - 关键:answer 没症状名 → 从 question 提靶点,**不要因为 answer 文本里没症状就漏识别**
+     b2. **串联问句多否认**(question 里用'和/或/、/逗号'串联多个鉴别点)—
+         **每个点都要单独写一项**,不要合并成一项,也不要只挑一个写:
+        - 例 Q="您发烧最高多少度?有没有打寒战?" + A="38度,没寒战"
+          → confirmed 加 "发热 38℃",denied 加 "寒战"
+        - 例 Q="便秘、腹泻或大便颜色变浅?" + A="无"
+          → denied 加 "便秘" + "腹泻" + "大便颜色变浅"
+        - 例 Q="尿频、尿急、尿痛或小便颜色异常?" + A="无"
+          → denied 加 "尿频" + "尿急" + "尿痛" + "小便颜色异常"
+     b3. **denied/confirmed 写入要带时态/维度后缀**,避免下轮看不出差异:
+        - "发热 38℃" 而不是只写"发热"(带量化)
+        - "右肩放射" / "背部放射"(各部位独立写)
+        - "近期饮酒" 而不是 "饮酒"(史 vs 近期独立)
+        - "既往胆囊炎" 而不是 "胆囊炎"(疾病史前缀,跟现症区分)
      c. **特别例外:type=open 的"还有没有别的不舒服"题**(对应 items_block 里
         "开放式问『还有别的不舒服』"那一条),答"无/没了/没有/没什么"等**只代表
         无新症状补充**,**不要**写到 denied(像 "其他不适"/"其他症状" 这种泛化词
         不是临床症状名,写进 denied 会污染下游决策)
+     d. **史类范畴的否认不进 denied_symptoms,进 history_fills 对应段**:
+        - 例 Q="您直系亲属有人得过胆结石?" + A="无"
+          → history_fills.family_conditions = ["胆结石:无"],**不写 denied_symptoms**
+        - 例 Q="您平时喝酒吗?" + A="不喝"
+          → history_fills.personal_conditions = ["饮酒:无"],**不写 denied_symptoms**
+        - 例 Q="您以前有过胆囊炎吗?" + A="没有"
+          → history_fills.past_conditions = [],**不写 denied_symptoms**(疾病史归 past_conditions)
+        - 但症状反复发作 ≠ 疾病史:Q="以前有过类似腹痛吗?" + A="无"
+          → denied 加 "既往类似腹痛"(症状史归 denied,见 b 例 2)
    - **uncertain_symptoms**(模糊/犹豫):"可能有点头晕"/"好像偶尔会咳"/"不太确定有没有发烧"
    - 同一句"有 A 没 B" → confirmed=[A], denied=[B];"可能 C" → uncertain=[C]
    - 用患者原文或常见医学短语,不要太长(如"反酸"、"右上腹放射痛")
@@ -480,12 +534,15 @@ def build_targeted_followup_prompt(
     medical_history_summary: str,
     quota: int,
 ) -> str:
-    """⑤ Step A(pro reasoner 决策)prompt:基于已填 HPI + 病史出**决策**双 list。
+    """⑤ Step A(flash 决策)prompt:基于已填 HPI + 病史出**决策**双 list。
 
-    - askable_targets:**英文短标签**,患者主观能告诉的靶点(如 radiation_to_back)
+    - askable_targets:**中文短语**,患者主观能告诉的靶点(如"疼痛放射到背部")
       → 后续 Step B(flash)再把每个 target 转成自然中文问句
     - unaskable_findings:患者答不上,必须查体/化验/影像才能知道的客观证据
       → ⑧a 首诊推单(已是医生侧 description + reason,无需再加工)
+
+    2026-05-22:askable_target 从英文 snake_case 改中文短语,跟 denied/confirmed
+    中文列表同语种,直接字符串对账去重,flash 不再"心里翻译"。
 
     严格约束:**只判该问/该查,不诊断**;**不要再问已知信息**(prompt 内显式去重要求)。
     """
@@ -496,7 +553,7 @@ def build_targeted_followup_prompt(
 
     return f"""你是问诊 holistic gate,**只负责判"还差什么信息",绝不做诊断**。
 你的输出会按"患者能不能答"分两路:
-  - 患者主观能答的 → 出**英文短标签**(askable_targets),稍后由另一个 LLM 拼成自然问句
+  - 患者主观能答的 → 出**中文短语**(askable_targets),稍后由另一个 LLM 拼成自然问句
   - 患者答不上,必须查体/化验/影像才能知道的 → 让用户去医院做(unaskable_findings)
 
 【当前已知】
@@ -516,10 +573,11 @@ def build_targeted_followup_prompt(
 判断进入检索/诊断前还差什么信息,按"患者能不能答"分两路:
 
 1. **askable_targets**(0~{quota - 1} 条):患者用语言能告诉你的主观信息**靶点**
-   - **只输出英文短标签**(snake_case),不写完整问句!
-   - 例:fever_max_temp / radiation_to_back / aggravating_after_meal /
-     associated_jaundice / similar_episode_history / pain_quality_detail
+   - **只输出中文短语**(简洁名词性短语,不写完整问句!不写英文!)
+   - 例:"发烧最高温度" / "疼痛放射到背部" / "饭后是否加重" / "皮肤巩膜黄染" /
+     "既往类似腹痛史" / "胆石家族史" / "近期饮酒" / "疼痛 NRS 评分"
    - 完整自然问句由下游 LLM(flash)拼,你只负责"该问哪些靶点"
+   - **专业医学缩写允许英文**(NRS / WBC / Murphy 等),其他必须中文
 
 2. **unaskable_findings**(0~{quota} 条):患者答不上,需要查体或检查才能确定的客观证据
    - 例:{{"description": "腹部 Murphy 征查体", "reason": "鉴别胆囊炎 vs 胃炎"}}
@@ -533,18 +591,21 @@ def build_targeted_followup_prompt(
 3. askable 只列**主观表现**靶点(发热温度、放射部位、加重缓解、伴随表现等)
 4. unaskable 只列**客观证据**(查体/化验/影像/心电图等);**不要把"问患者有没有"放进 unaskable**
 5. 两路不要重复同一个信息(同一项要么 askable 要么 unaskable,不能两边都出)
-6. **去重铁律**:已经出现在【当前已知】任意位置的信息**绝不再问**:
+6. **去重铁律**:已经出现在【当前已知】任意位置的信息**绝不再问**(因 askable_target 现在
+   是中文短语,直接字符串包含/语义重叠就算"已在列表里"):
    - 已填 HPI 维度已经有值的(包括"已问过但患者答不上"的)→ 不要重复
-   - 已确认/已否认/不确定症状列表里的症状名 → 不要再问"有没有 X"
-   - 病史档案显示"已询问,无"的范畴(过敏/慢病/既往疾病)→ 不要再问该范畴
+   - 已确认/已否认/不确定症状列表里的症状名 → 不要再问"有没有 X" 也不出 X 的细分变体
+   - 病史档案显示"已询问,无"的范畴(过敏/慢病/既往疾病/家族史)→ 不要再问该范畴
    - 现病史自由文本已经提到的细节(如温度数值、伴随表现)→ 不要再问相同细节
+   - 例:已 denied 含"胆石家族史" → askable 不再出"胆石家族史"或"父母兄弟胆结石史"
+   - 例:已 denied 含"近期饮酒" → askable 不再出"发作前饮酒"等细分(完全否认已 cover)
 7. 信息已充分时,两个 list 都输出 [] — 不要硬凑
 
 # 输出格式(严格 JSON,**字段名必须照下方模板原样,不要新造字段名,不要 markdown 代码块包裹,不要解释**)
 
 ```
 {{
-  "askable_targets": ["<英文 snake_case 短标签>", "<...>"],
+  "askable_targets": ["<中文短语,如 '发烧最高温度'>", "<...>"],
   "unaskable_findings": [
     {{"description": "<医生侧语言,如 '腹部 Murphy 征查体'>", "reason": "<为什么对鉴别重要,如 '鉴别胆囊炎 vs 胃炎'>"}}
   ]
@@ -566,47 +627,58 @@ def build_question_generation_prompt(
     chief_complaint: str,
     present_illness: str,
     askable_targets: list[str],
+    confirmed_symptoms: list[str],
+    denied_symptoms: list[str],
 ) -> str:
-    """⑤ Step B prompt:把 Step A 出的英文短标签 list 转成患者侧自然中文问句。
+    """⑤ Step B prompt:把 Step A 出的中文短语 list 转成患者侧自然中文问句。
 
     用 flash(非 thinking)跑,耗时 1-3s。输出 1-1 映射:每个 target 出一条
-    {question, target},target 必须原样回填(便于审计追踪)。
+    {question, target},target 必须原样回填(中文短语,便于下轮去重)。
+
+    2026-05-22:
+      - askable_target 从英文 snake_case 改中文短语(全链路中文统一)
+      - 增加 confirmed/denied 上下文,prompt 约束"串联小问不能带入已知症状"
+        (修问题 6:Step B 把已 denied 的"寒战""尿色加深"打包进问句导致半重复)
     """
     targets_block = "\n".join(f"  - {t}" for t in askable_targets)
-    return f"""你是问诊文案助手,把医生侧的靶点短标签转成患者能听懂的中文问句。
+    confirmed_block = "、".join(confirmed_symptoms) or "(无)"
+    denied_block = "、".join(denied_symptoms) or "(无)"
+    return f"""你是问诊文案助手,把医生侧的中文靶点短语转成患者能听懂的自然中文问句。
 
 【上下文】
 - 主诉:{chief_complaint}
 - 现病史:{present_illness}
+- 已确认症状(不要再问"有没有 X"):{confirmed_block}
+- 已否认症状(**串联打包时绝对不能再带入这些**):{denied_block}
 
-【要转换的靶点列表(英文 snake_case)】
+【要转换的靶点列表(中文短语)】
 {targets_block}
 
 【转换规则】
-1. 每个 target 转成 **1 条 question + target 原样回填**
-2. question 是**自然中文口语**问句,患者能听懂,可以串联同主题的小问
-   - 例 fever_max_temp → "您发烧最高到多少度?有没有寒战?"
-   - 例 radiation_to_back → "疼痛会不会放射到背部?哪一侧?"
-   - 例 associated_jaundice → "您有没有注意到皮肤或眼睛发黄?"
+1. 每个 target 转成 **1 条 question + target 原样回填(中文短语,不要翻译成英文)**
+2. question 是**自然中文口语**问句,患者能听懂,可以串联同主题的小问 —— 但**串联内容必须
+   全是新的鉴别点**,**严禁带入【已确认/已否认】列表里出现过的症状词**:
+   - 例 target="发烧最高温度" + denied 含"寒战" → "您发烧最高到多少度?"(不能再串"有没有寒战")
+   - 例 target="发烧最高温度" + denied 不含"寒战" → "您发烧最高到多少度?有没有寒战?"(可串)
+   - 例 target="排便异常" + denied 含"大便颜色变浅" → "您最近排便习惯有变化吗,比如便秘或腹泻?"(剔除"颜色")
+   - 例 target="小便异常" + denied 含"尿色加深" → "您有没有尿频、尿急或尿痛?"(剔除"尿色")
 3. **严禁泛化代词**(如"类似情况"/"相同症状"/"这种问题"/"上面那个"等),
    必须把**主诉的具体症状名嵌入问句**,让下游(⑦ flash 解析)和患者都能明确知道指什么:
-   - 例 similar_episode_history + 主诉"右上腹疼痛" → "您**以前有没有过类似的右上腹疼痛**?"
+   - 例 target="既往类似腹痛史" + 主诉"右上腹疼痛" → "您**以前有没有过类似的右上腹疼痛**?"
      **不**写 "您以前有过类似情况吗?"
-   - 例 fever_chills + 主诉"腹痛伴发热" → "您发烧时**有没有打寒战**?"
-     **不**写 "您发烧时有没有别的症状?"
-   - 例 worsening_pattern + 主诉"上腹痛" → "您的**上腹痛**是越来越重还是越来越轻?"
+   - 例 target="症状演变趋势" + 主诉"上腹痛" → "您的**上腹痛**是越来越重还是越来越轻?"
      **不**写 "症状有变化吗?"
    - **关键**:把主诉/现病史里出现过的症状词(如"右上腹疼痛""发热""恶心")**原样嵌进 question**,
      这样患者一眼看懂问的是什么,⑦ 解析时也能从 question 抽出靶点症状
 4. **不要诊断、不要给疾病名**,只问表现
-5. 顺序与输入顺序保持一致;target 字段**原样**回填输入的英文短标签
+5. 顺序与输入顺序保持一致;target 字段**原样**回填输入的中文短语(不改写、不翻译、不删字)
 
 # 输出格式(严格 JSON,**字段名必须照下方模板原样,不要 markdown 代码块包裹,不要解释**)
 
 ```
 {{
   "questions": [
-    {{"question": "<患者侧自然中文问句>", "target": "<原样回填输入的英文短标签>"}}
+    {{"question": "<患者侧自然中文问句>", "target": "<原样回填输入的中文短语>"}}
   ]
 }}
 ```

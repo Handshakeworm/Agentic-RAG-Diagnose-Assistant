@@ -1964,13 +1964,15 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
     #   "progression":         str|None,  # 病程演变（随时间加重/减轻/稳定/波动，如"三天来越来越重"）
     #   "treatments":          list[str], # 诊疗经过+反应（2026-05-22:合并自旧 treatment_tried+treatment_response;每条半结构化 "<治疗>: <反应>"，如 ["布洛芬: 无效", "热敷: 部分缓解"]）
     # }
-    medical_history: dict                 # 结构化病史信息（从 DB 加载的历史档案，不含主诉和现病史）
+    medical_history: dict                 # 结构化病史信息（DB 加载 + ⑦ 动态采集合并；不含主诉和现病史）
     # - past_history: dict               # 既往史（基础病/手术/外伤/输血/传染病）
     # - allergy_history: list            # 过敏史 ⚠️安全底线
     # - medication_history: list         # 用药史
-    # - personal_history: dict           # 个人史（烟酒/职业/旅居）
+    # - personal_history: dict           # 个人史（烟酒/职业/旅居）+ dynamic_notes: list[str]（⑦ 动态采集原文）
+    # - personal_history_asked_no: list[str]  # 2026-05-22 新增：⑤/⑦ 问过但答无的个人史项目名（如 ["饮酒"]），⑤ 据此去重
     # - obstetric_history: dict|None     # 婚育史（女性）
-    # - family_history: list             # 家族史
+    # - family_history: list             # 家族史（真实阳性 entry，纯阳性语义）
+    # - family_history_asked_no: list[str]   # 2026-05-22 新增：⑤/⑦ 问过但答无的家族疾病名（如 ["胆结石"]），⑤ 据此去重
     exam_reports: list[dict]             # 患者上传的检查报告文件引用列表（轻量引用，不存图片/PDF原文）
     # 每项结构：{"file_ref": str}
     # - file_ref: 文件路径或对象存储 URL（初始报告来自 DB file_path，检查回传由 ⑨ 落盘后生成）
@@ -2396,18 +2398,20 @@ result = graph.invoke(initial_state, config=config)
 
 > **拆分设计**:LLM 生成与 `interrupt` 等待分属两个节点。LangGraph `interrupt` 恢复时会重新执行整个节点,若 LLM 调用与 `interrupt` 在同一节点,恢复时会重复调用 LLM(浪费 token 且可能生成不同问题)。拆分后恢复时只重执行轻量的 `wait_followup_answer` 节点。
 
-**⑤ `generate_followup`**(单 LLM, 双 list 出口, 检索前 holistic gate):
-- **定位**:**进 ②③④ 检索/鉴别前的最后一道 holistic gate**。intake 把 12 维 slot 灌完后,⑤ 一次 LLM 同时判 **"还差什么信息"**,按"患者能不能答"分两路 list:
-  - `askable_questions` → 患者主观能答(走 ⑥ 让用户答)
+**⑤ `generate_followup`**(2 LLM 拆分:Step A 决策 + Step B 拼问句,检索前 holistic gate):
+- **定位**:**进 ②③④ 检索/鉴别前的最后一道 holistic gate**。intake 把 12 维 slot 灌完后,⑤ Step A flash 一次判 **"还差什么信息"**,按"患者能不能答"分两路 list:
+  - `askable_targets`(**中文短语**)→ 患者主观能答(走 Step B 拼问句 → ⑥)
   - `unaskable_findings` → 患者答不上(需查体/化验/影像 → 走 ⑧a 首诊推单)
   避免"检索→不够→追问→再检索"的来回烧 GPU/时延, **目的是让 ⑩ 大概率一次诊断结案,⑩ 后只在 need_exam 时补漏一次**。
 - **触发**:`intake_followup_ask` 之后 + ⑦ 翻译完发现 `candidate_chunks` 还空(`post_followup_router` 走 `loop_to_followup`)。④ 出的鉴别诊断追问**不经过 ⑤**(④ → ⑥ 直连)。
 - **输入**: `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`medical_history` 摘要
-- **模型**:用 `settings.llm.MODEL_NAME`(默认 `deepseek-v4-pro`)— 决定"该问什么/该查什么"影响 ⑩ 跑几次,质量优先。
+- **模型**:Step A + Step B 都用 `settings.llm.FAST_MODEL_NAME`(flash)— 2026-05-22 Step A 从 pro reasoner 改 flash,避开 60s retry storm,实测 5-15s 完成。
 - **职责**:
-  - 1 次 LLM 调用产 `HolisticGateOutput { askable_questions, unaskable_findings }`(**严格不输出诊断/疾病名/probability**);LLM 觉得够了两个 list 都返空。
+  - **拆 2 步 LLM 调用**(2026-05-21 拆分,2026-05-22 Step A 切 flash + askable_target 改中文):
+    - **Step A**(`HolisticGateDecision`):flash 看全量 state 出 `askable_targets`(**中文短语**,如"发烧最高温度"/"胆石家族史")+ `unaskable_findings`(医生侧 description + reason);**严格不输出诊断/疾病名/probability**;两 list 都空 = 信息充分
+    - **Step B**(`QuestionGenOutput`,仅 askable_targets 非空才调):flash 把每个中文短语 → 患者侧自然中文问句 `{question, target}`,target 原样回填中文短语(便于下轮 Step A 直接字符串去重对账)
   - 节点内**优先级**写 state:
-    - `askable_questions` 非空 → 转成 `followup_questions` + 模板拼 `followup_question` → router 走 `to_wait` (⑥)
+    - askable_targets 非空 → Step B 拼 `followup_questions` + 末尾追加 1 条 open 兜底 → router 走 `to_wait` (⑥)
     - 否则 `unaskable_findings` 非空 → router 走 `to_recommend_exam` (⑧a 首诊)
     - 都空 → router 走 `to_build_query` (②)
   - **`unaskable_symptoms` 每次都写**(不管走哪条出口),保证下游(⑩ 或 ⑧a)随时能消费 ⑤ 累积的 unaskable 列表。
@@ -2583,6 +2587,31 @@ result = graph.invoke(initial_state, config=config)
   - LLM 组织自然语言回复，包含免责声明
   - `failure_reason` 非 None 时，在免责声明中补充一句"本次诊断因系统原因未能完整推理，结果仅供参考，请务必线下就诊"——不暴露具体异常细节，保持用户侧信息简洁
 - **输出**: 更新 `final_response`
+
+##### ⑭ `persist_history` — 病史沉淀回 PG（**2026-05-22 backlog,未实现,留接口契约**）
+- **位置**: **⑫ 之后跟 ⑬ 并行 fan-out**(`⑫ → {⑬, ⑭} → END`),两节点都只读 state.medical_history、互不依赖。
+  总耗时 = `⑫ + max(⑬, ⑭)`,⑭ 不影响用户响应延迟(⑬ 是 LLM 调用,⑭ 也是 LLM 调用,~等长)。
+  SSE 在 ⑬ 完成时即推 `completed` event,前端用户已经看到结果;⑭ 后完成只是 graph 内最后 event。
+- **触发条件**: `diagnosis_result` 非空且不是 `insufficient`(无效会话不沉淀,避免脏数据)
+- **输入**: `state.medical_history`(累积的档案 + 问诊采集)
+  - `family_history`: list[dict],含 `notes` 原文(解析失败的 entry 也保留原文)
+  - `family_history_asked_no`: list[str]
+  - `personal_history.dynamic_notes`: list[str]
+  - `personal_history_asked_no`: list[str]
+  - 现有 `allergy_history` / `medication_history` / `past_history` / `obstetric_history`
+- **任务**: 用 LLM 把自然语言粒度的动态采集 → PG 表精细字段:
+  - `family_history.notes` → 拆 `relation` / `condition` / `condition_category` / `onset_age`
+  - `personal_history.dynamic_notes` "吸烟:每天1包15年" → `patients.smoking_status='current'` + `smoking_pack_years=15`
+  - `personal_history_asked_no` "饮酒" → `patients.alcohol_status='never'`(已问过的标记)
+  - `family_history_asked_no` "胆结石" → family_history 表加 `asked_no=True` 行(或独立 asked_no 表)
+- **持久化**: UPSERT 到 `patients` / `family_history` / 各 history 表
+- **失败兜底**(**中安全等级,跟 ⑬ 并行不能拖累主响应**):
+  - LLM 失败 / DB 写入失败 → 异常在节点内捕获,记 ERROR 日志 + Prometheus metric(`persist_history_failure_total`)
+  - **绝不抛回 graph**(否则会让 graph END 失败,影响 ⑬ 已经发出的响应)
+  - 失败的 state.medical_history 落盘到 dead-letter 队列(本地 JSON 或 Redis),后续 cron 重试
+- **接口约束**(本 sprint C+B 保证):
+  - `state.medical_history` 所有动态新增 entry 保留原文(`notes` 字段或 raw 字符串)
+  - `_asked_no` 两 list 语义明确(已问过但答无的范畴名),沉淀时直接消费
 
 #### 4.1.3 Edge 路由与条件分支
 
@@ -2939,7 +2968,7 @@ Agent 工作流中不同节点对上下文的需求不同。每个节点在调�
 | `retrieve` ③ | `dense_query`、`sparse_queries` | 否（纯检索） | `dense_query: "外伤后中间清醒期意识恶化伴瞳孔不等大及锥体束征"` + `sparse_queries: ["恶心", "呕吐", "右侧瞳孔散大", "左侧Babinski征阳性", "右额颞线形骨折"]` → Dense ANN + N×BM25 → RRF 融合 |
 | ~~`extract_symptoms` ④~~ | — | — | **节点已删除**(TF-IDF 抽症状对患者追问无价值,见 §4.1.2 ④);④ 直接从 state 出追问 |
 | `select_discriminative_symptom` ④ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms` | 是(1 LLM:SmartFollowupOutput) | LLM 一次输入 state → 同时出 questions(≤5 条追问,`type` ∈ `{"slot","open"}`) + unaskable_symptoms(≤5 条想知道但患者答不上的体征粗筛,`{description, reason}`);后续 ⑩ Step 3 输出 retained_unaskable 覆盖粗筛 → 精筛供 ⑧a 消费 |
-| `generate_followup` ⑤ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`medical_history` 摘要 | 是(1 LLM:`HolisticGateOutput`, 模型 `MODEL_NAME=deepseek-v4-pro`) | **检索前 holistic gate, 双 list 输出**:LLM 看全量 state 一次出 `askable_questions`(患者主观能答,走 ⑥)+ `unaskable_findings`(患者答不上,走 ⑧a 首诊推单);优先级 askable > unaskable > 空;每次都写 `unaskable_symptoms` 供下游消费;④ 路追问 → ⑥ 直连不经过 ⑤ |
+| `generate_followup` ⑤ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms`、`medical_history` 摘要 | 是(2 LLM:Step A `HolisticGateDecision` + Step B `QuestionGenOutput`,均 `FAST_MODEL_NAME=flash`) | **检索前 holistic gate, 双 list 输出 + 2 步拆分**(2026-05-21 拆 Step A/B,2026-05-22 Step A 切 flash + askable_target 改中文):Step A flash 出 `askable_targets`(**中文短语**)+ `unaskable_findings`;askable 非空时 Step B flash 把短语 → 自然问句 `{question, target}`;优先级 askable > unaskable > 空;每次都写 `unaskable_symptoms` 供下游消费;Step B 也传 confirmed/denied 上下文约束串联打包不带入已知症状 |
 | `process_followup_answer` ⑦ | `followup_question`、`followup_answer`、`followup_questions`（含类型标记）、`confirmed_symptoms`、`denied_symptoms`、`present_illness_slots`（维度回填目标）、`present_illness`（维度回答追加目标） | 是 | 症状级：`followup_answer: "有的"` → 确认症状；维度级：`followup_answer: "吃完饭后疼得厉害"` → 回填 `present_illness_slots["aggravating"]` + 追加 `present_illness` |
 | `recommend_exam` ⑧a | `chief_complaint`、`present_illness`、`unaskable_symptoms`、`report_findings`、`exam_round`、`diagnosis_result`(空=首诊模式;非空=鉴别模式) | 是 | **双模式**:首诊模式(⑤ 触发)透传消费 `unaskable_symptoms` → 患者友好检查清单;鉴别模式(⑩ 后 `need_exam`)基于 `diagnosis_result` 候选 + `retained_unaskable` 推针对性补漏;**不再读 `candidate_chunks`**(prompt 短延迟低,医学推理已在 ⑤/⑩ 完成) |
 | `process_exam_result` ⑨ | 用户上传的检查结果文本 | 是 | 多模态 LLM 直读报告，提取结构化发现追加到 `exam_reports` 和 `report_findings` |
@@ -3788,7 +3817,8 @@ flowchart TD
 | `build_ner_prompt` | ② | 从新增文本中抽取医疗实体（症状/疾病/药物/解剖），含否定标记与时序 |
 | `build_query_construction_prompt` | ② | 基于标准化实体构造 Dense / Sparse 双路查询 |
 | `build_smart_followup_prompt` | ④ | 1 LLM 直接选追问 — 输入 state(主诉 + 12 维 slots 空缺 + 已问症状),输出 `questions: list[FollowupQuestion]`(slot 维度填补 / open 兜底问) |
-| `build_targeted_followup_prompt` | ⑤ | 检索前 holistic gate — 输入全量 state(主诉/HPI/12 维 slots/三类症状/档案摘要),输出 `HolisticGateOutput { askable_questions: list[{question, target}], unaskable_findings: list[{description, reason}] }`(askable = 患者主观能答;unaskable = 必须查体/化验/影像);**严格不输出诊断/疾病名/probability**,信息已足两 list 都返空 |
+| `build_targeted_followup_prompt` | ⑤ Step A | 检索前 holistic gate Step A — 输入全量 state(主诉/HPI/12 维 slots/三类症状/档案摘要),输出 `HolisticGateDecision { askable_targets: list[str], unaskable_findings: list[{description, reason}] }`;`askable_targets` 是**中文短语**(2026-05-22 改,跟 denied/confirmed 同语种对账去重);**严格不输出诊断/疾病名/probability**,信息已足两 list 都返空 |
+| `build_question_generation_prompt` | ⑤ Step B | 检索前 holistic gate Step B(仅 askable_targets 非空时调) — 输入 Step A 出的中文短语 list + confirmed/denied 上下文,输出 `QuestionGenOutput { questions: list[{question, target}] }`;question 是自然中文口语问句,target 原样回填中文短语;串联打包**禁止带入已 denied/confirmed 的症状词** |
 | `build_followup_parse_prompt` | ⑦ | 解析患者追问回答:slot 类 → 回填 `present_illness_slots` + 追加 `present_illness`;open 类 → 提取新症状到 `new_symptoms`(由 ⑦ append 到 confirmed_symptoms) |
 | `build_exam_recommendation_prompt` | ⑧ | 根据待鉴别症状推断所需检查（体格检查+辅助检查），输出优先级与鉴别理由 |
 | `build_diagnose_prompt` | ⑩ 1 步 LLM | 诊断推理：全量患者画像(主诉+现病史+slots+symptoms+history+reports)+ 文献(20 父块 + figure 多模态)+ ④ unaskable 粗筛 → 一次 LLM 出 `DiagnosisOutput`(results + retained_unaskable);对齐 RAG 评测 `.eval/rag_eval/run_diagnose_eval.py` 口径,3 步链已废弃 |
