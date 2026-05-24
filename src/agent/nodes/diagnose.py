@@ -297,10 +297,16 @@ def diagnose(state: MedicalState) -> dict:
     # 结构化展开 8 个子项,空字段显式标"未询问 ≠ 阴性"(对齐评测口径)
     slots_dict = state.present_illness_slots.model_dump()
 
+    # 2026-05-24:照搬 .eval/rag_eval/run_diagnose_eval.py 评测验证的配置(top1 93.5%)
+    # — qwen3.5-plus thinking 模式 reasoning + content 共享 max_tokens budget。
+    # 之前 get_llm 默认 60s/2048 在生产代码导致 LengthFinish + APITimeout 双失败。
+    # 评测踩过同一个坑,调好的数从未回流到生产 ⑩(评测脚本 bypass get_llm 自己 new)。
     vision_llm = get_llm(
         model=settings.llm.VISION_MODEL_NAME,
         base_url=settings.llm.VISION_BASE_URL,
         api_key=settings.llm.VISION_API_KEY,
+        timeout_seconds=300,    # 5 分钟容忍 thinking 推理
+        max_tokens=16384,       # 16k 装下 thinking + JSON 输出
     )
     chain = vision_llm.with_structured_output(
         DiagnosisOutput, method="json_mode"

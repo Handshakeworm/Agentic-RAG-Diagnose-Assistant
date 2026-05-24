@@ -21,6 +21,9 @@ def test_create_initial_state_returns_all_36_fields() -> None:
     2026-05-21 followup_source 字段移除(⑦ 后路由分流改用 candidate_chunks 隐含信号,
     避免在 state 里加元数据字段);36 → 35。
     2026-05-22 recommended_test_groups 加入(⑧a 写,⑧b/⑨ 消费);35 → 36。
+    2026-05-23 asked_targets 加入(L2:⑤ Step B 写过的 target 短语去重列表,
+    Step A 注入做硬去重防重复问);36 → 37。
+    2026-05-24 last_nlu_round 移除(② NER 整段删除,该游标随之报废);37 → 36。
     """
     from src.agent.state import MedicalState, create_initial_state
 
@@ -38,8 +41,8 @@ def test_create_initial_state_returns_all_36_fields() -> None:
         "confirmed_symptoms", "denied_symptoms", "uncertain_symptoms",
         # 追问控制(info_gain 随信息增益机制移除一并删除;intake_phase 保留;
         # followup_source 已于 2026-05-21 移除)
-        "followup_round", "last_nlu_round", "followup_question", "followup_answer",
-        "followup_questions", "unaskable_symptoms",
+        "followup_round", "followup_question", "followup_answer",
+        "followup_questions", "unaskable_symptoms", "asked_targets",
         "exam_round", "pending_exam_results",
         "intake_phase",
         # 诊断
@@ -126,7 +129,6 @@ def test_initial_values_match_spec_4_1_1a() -> None:
 
     # 整数零值
     assert s.followup_round == 0
-    assert s.last_nlu_round == 0
     assert s.exam_round == 0
 
     # 空容器

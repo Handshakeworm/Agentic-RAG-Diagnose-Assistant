@@ -21,7 +21,6 @@ from src.agent.schemas.info_collect import (
     InfoCollectOutput,
     PresentIllnessSlots as SchemaSlots,
 )
-from src.agent.schemas.ner import NEREntity, NERResult
 from src.agent.schemas.query_construction import QueryConstructionOutput
 from src.agent.schemas.safety_gate import SafetyGateOutput
 from src.agent.state import create_initial_state
@@ -149,11 +148,7 @@ def test_normal_confirmed_path(stub_dbs):
             present_illness="进食后上腹胀痛",
             present_illness_slots=schema_slots,
         ),
-        # ② NER
-        NERResult(entities=[
-            NEREntity(text="腹痛", entity_type="symptom", negation=False),
-        ]),
-        # ② EL: 三层归一化(无 LLM,Tier 1 走 query_term_by_alias_exact mock 命中)
+        # ② NER 已删(2026-05-24);现在 ② 只剩 Query 构建一次 LLM
         # ② Query
         QueryConstructionOutput(dense_query="进食后上腹胀痛"),
         # ④ select_symptom: 已在 stub 里直接返回空 followup,跳过 LLM 调用
@@ -241,8 +236,7 @@ def test_followup_round_capped_path(stub_dbs):
             present_illness="x",
             present_illness_slots=schema_slots,
         ),
-        # ② build_query:check path(followup_round == last_nlu_round 且非首轮)→
-        #     跳 NER + EL,只跑 Step 4 Query 构建
+        # ② build_query:NER 已删,只剩 Step 2 Query 构建一次 LLM
         QueryConstructionOutput(dense_query="x"),
         # ④ select_symptom 已被 stub 替代(无 LLM 调用)
         # ⑩ Step -1 触顶,跳过 LLM(0 个)
@@ -279,9 +273,7 @@ def test_followup_round_capped_path(stub_dbs):
         config = {"configurable": {"thread_id": "test-capped"}}
         state_in = create_initial_state(patient_id="P", patient_input="腹痛")
         state_in.followup_round = settings.agent_limits.MAX_FOLLOWUP_ROUNDS
-        # check path:同时把 last_nlu_round 设到 MAX,build_query 走 Step-4-only 路径,
-        # 避免 NER/EL 消耗多余的 mock 队列项
-        state_in.last_nlu_round = settings.agent_limits.MAX_FOLLOWUP_ROUNDS
+        # 2026-05-24:NER 已删,无需再设 last_nlu_round 避 NER mock 消耗
         result = app.invoke(state_in, config=config)
     finally:
         for p in patches:

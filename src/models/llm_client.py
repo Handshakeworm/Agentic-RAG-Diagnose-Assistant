@@ -7,11 +7,11 @@
 业务节点用法(典型):
 
     from src.models.llm_client import get_llm
-    from src.agent.schemas.ner import NERResult
+    from src.agent.schemas.query_construction import QueryConstructionOutput
     from src.common.metrics import _attempts, _failures, _latency, retry_observer
 
     llm = get_llm()
-    chain = llm.with_structured_output(NERResult).with_retry(stop_after_attempt=3)
+    chain = llm.with_structured_output(QueryConstructionOutput).with_retry(stop_after_attempt=3)
     # ... 按 §9.1 模板写 try/except/finally + 6 个指标埋点
 """
 
@@ -40,11 +40,15 @@ def get_llm(
     `max_tokens` 默认从 `settings.llm.MAX_TOKENS` 读(.env `LLM_MAX_TOKENS` 可覆盖);
     DeepSeek thinking 模型不设 max_tokens 会拖到 100s+,务必保留这个限制。
 
-    多模态调用(F2.5 / F9 report_parser)需要显式传 vision 三件套:
+    **Vision LLM(⑩ diagnose / report_parser)必须显式覆盖默认 timeout/max_tokens**:
+    qwen3.5-plus thinking 模式 reasoning + content 共享 budget,2048 默认会触发
+    LengthFinish 截断;60s timeout 会触发 ReadTimeout。评测验证的稳定值:
         get_llm(
             model=settings.llm.VISION_MODEL_NAME,
             base_url=settings.llm.VISION_BASE_URL,
             api_key=settings.llm.VISION_API_KEY,
+            timeout_seconds=300,
+            max_tokens=16384,
         )
     enrichment 等场景若要换模型/温度/max_tokens,显式传参覆盖。
     """

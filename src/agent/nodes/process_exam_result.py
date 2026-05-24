@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 
 from src.agent.state import MedicalState
-from src.agent.utils.report_parser import parse_reports
+from src.agent.utils.report_parser import parse_reports_parallel
 
 
 _logger = logging.getLogger(__name__)
@@ -32,6 +32,9 @@ def process_exam_result(state: MedicalState) -> dict:
     new_findings: list[dict] = []
     skipped_labels: list[str] = []
 
+    # 第 1 阶段:遍历 group 拆任务 + 追加 exam_reports refs(不调 LLM,只整理元数据)
+    tasks: list[tuple[list[str], str | None]] = []  # 喂 parse_reports_parallel
+    task_labels: list[str] = []  # 跟 tasks 同序,用于回填 group_label
     for group in pending:
         if not isinstance(group, dict):
             continue
@@ -54,10 +57,16 @@ def process_exam_result(state: MedicalState) -> dict:
         for fref in files:
             new_refs.append({"file_ref": fref, "group_label": label})
 
-        # parse_reports 按本组的 files 调一次多模态(带 hint)
-        group_findings = parse_reports(files, hint=hint)
+        tasks.append((files, hint))
+        task_labels.append(label)
+
+    # 第 2 阶段:**所有 group 并行**调 parse_reports(VLM 远程 API,顺序跑会线性累加)
+    findings_per_task = parse_reports_parallel(tasks)
+
+    # 第 3 阶段:按 task 顺序回填 group_label,展平到 new_findings
+    for label, group_findings in zip(task_labels, findings_per_task):
         for f in group_findings:
-            f.setdefault("group_label", label)  # finding 也带 group_label 帮追溯
+            f.setdefault("group_label", label)
         new_findings.extend(group_findings)
 
     if skipped_labels:

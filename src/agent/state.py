@@ -129,11 +129,13 @@ class MedicalState(BaseModel):
 
     # === 追问控制 ===
     followup_round: int = 0
-    last_nlu_round: int = 0
     followup_question: str = ""
     followup_answer: str = ""
     followup_questions: list[dict] = Field(default_factory=list)
     unaskable_symptoms: list[dict] = Field(default_factory=list)
+    # ⑤ Step B 出过的所有 targeted question 的 target 短语(去重 append),Step A 注入做硬去重。
+    # 不管患者答没答、答上没,只要 ⑤ 出过这个 target 就记一笔,绝不再问。
+    asked_targets: list[str] = Field(default_factory=list)
     exam_round: int = 0
     pending_exam_results: list = Field(default_factory=list)
 

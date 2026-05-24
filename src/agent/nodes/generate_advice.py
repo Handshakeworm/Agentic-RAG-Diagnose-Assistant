@@ -25,8 +25,9 @@ _logger = logging.getLogger(__name__)
 _NODE = "generate_advice"
 _SCHEMA = "AdviceOutput"
 
-_FAILURE_NOTE_CAPPED = "本次问诊轮次较多仍未收敛,建议线下就诊以获得更全面的评估"
-_FAILURE_NOTE_STEP = "系统分析过程出现技术问题,本次诊断结果不可作为依据,请尽快线下就诊"
+# 2026-05-24 折中口径:保留安全免责,但语气调柔(尚处于探索测试阶段 + 仅供参考 + 建议结合线下医生)
+_FAILURE_NOTE_CAPPED = "本次问诊轮次较多仍未收敛。本系统尚处于探索和测试阶段,建议结合线下医生综合评估"
+_FAILURE_NOTE_STEP = "系统分析过程出现技术问题。本系统尚处于探索和测试阶段,本次结果仅供参考,建议结合线下医生综合评估"
 
 _SEVERITY_LABEL: dict[str, str] = {
     "high": "高风险",

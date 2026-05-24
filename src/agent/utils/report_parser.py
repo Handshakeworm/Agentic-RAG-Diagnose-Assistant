@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from langchain_core.messages import HumanMessage
 
@@ -92,6 +93,10 @@ def parse_reports(file_refs: list[str], hint: str | None = None) -> list[dict]:
                 model=settings.llm.VISION_MODEL_NAME,
                 base_url=settings.llm.VISION_BASE_URL,
                 api_key=settings.llm.VISION_API_KEY,
+                # 2026-05-24:对齐 ⑩ diagnose 配置(评测验证的 timeout=300/max_tokens=16384)
+                # qwen3.5-plus thinking 模式 reasoning+content 共享 budget,2048 默认不够
+                timeout_seconds=300,
+                max_tokens=16384,
             )
             .with_structured_output(ReportFindings)
             .with_retry(stop_after_attempt=3)
@@ -128,3 +133,28 @@ def parse_reports(file_refs: list[str], hint: str | None = None) -> list[dict]:
         record["report_index"] = i if i < len(file_refs) else len(file_refs) - 1
         out.append(record)
     return out
+
+
+def parse_reports_parallel(
+    tasks: list[tuple[list[str], str | None]],
+) -> list[list[dict]]:
+    """对多组报告**并行** VLM 解析。每个 task = (files, hint) 独立调一次 parse_reports。
+
+    VLM 调用是远程 API I/O bound,顺序跑会线性累加(实测 3 组各 40s/60s/40s = 140s)。
+    用 ThreadPoolExecutor 并行,总耗时 ≈ max(各 task elapsed),典型场景省 50%+。
+    每 task 独立 LLM 调用,无共享状态,线程安全。
+
+    Returns:
+        list[list[dict]],与 tasks 同长度同顺序;每项是该 task 的 findings list。
+        某 task 失败 → 对应位置返空 list(沿用 parse_reports 单调用的 fail-soft 行为)。
+    """
+    if not tasks:
+        return []
+    if len(tasks) == 1:
+        # 单组无需起线程池,直接顺序调,省一层开销
+        return [parse_reports(*tasks[0])]
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as ex:
+        futures = [ex.submit(parse_reports, files, hint) for files, hint in tasks]
+        # 按提交顺序收结果(.result() 阻塞等单个完成,但线程池里其他 task 已并发开跑)
+        return [f.result() for f in futures]

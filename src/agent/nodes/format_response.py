@@ -16,6 +16,7 @@ from src.common.metrics import (
     _latency,
     retry_observer,
 )
+from config.settings import settings
 from src.models.llm_client import get_llm
 from src.prompts.agent import build_format_response_prompt
 
@@ -46,7 +47,9 @@ def format_response(state: MedicalState) -> dict:
     _attempts.labels(node=_NODE, schema=_SCHEMA).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_retry(stop_after_attempt=3)
+        # 2026-05-24:⑬ 是纯 reformatting(把 state 已有结构化结果改写成患者段落),
+        # 不涉及新临床判断,切 flash 省 5-10s(评测显示 pro 在此任务无收益)
+        chain = get_llm(model=settings.llm.FAST_MODEL_NAME).with_retry(stop_after_attempt=3)
         msg = chain.invoke(
             prompt,
             config={

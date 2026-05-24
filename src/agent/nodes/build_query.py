@@ -1,25 +1,25 @@
 """src/agent/nodes/build_query.py — Agent ② build_query 节点(DEV_SPEC §4.1.2 ②)。
 
-三步流程,每轮循环均完整执行:
+**2026-05-24 删除 Step 1 NER** — 经评估完全冗余:
+  - 首轮 chief/present 是 ① info_collect 刚写出来的,同时 ① 已 holistic 抽好 confirmed/denied/uncertain;
+    ② 二次 NER 信息源相同(且更窄,看的是 ① 浓缩后),不可能补到 ① 没抓到的症状,
+    反而字符串近似匹配(如"右上腹疼痛" vs "右上腹痛")会重复塞污染 confirmed
+  - 后续轮 NER 抽了 entities 也只在 `if is_first_round` 才分流 — 死代码,纯 70s 空转
+  - check 路径(报告回传后)本来就 skip
+  - 删后省 70s/轮,首轮亦省;新增症状全部由 ① / ⓪a + intake_followup_ask / ⑦ 三个采集节点产
 
-  Step 1 NER             — LLM 抽取医学实体(首轮:chief + present_illness;后续轮:
-                           仅当 followup_round > last_nlu_round 时对 followup_answer
-                           NER,跳过空转)
-                           首轮把 NER 抽到的 symptom 类(temporality=current)按
-                           negation 分流写入 confirmed_symptoms / denied_symptoms,
-                           直接用 raw text(无 EL,无 preferred_term 归一化)
-  Step 2 Sparse 多字段直采 — 不查 terms_collection,纯 state 字段拼接:
-                           chief_complaint + slots 单值字段(trigger / location /
-                           nature / severity / duration_pattern / onset_mode)+ slots
-                           list 字段(associated_symptoms / aggravating / relieving)
-                           + report_findings 的 positive_findings(全加)+ impressions
-                           (阴性过滤:含 "(-)" / "正常" / "阴性" / "未见" / "无异常"
-                           的整条跳过,避免 BM25 不懂否定造成反向召回)
-  Step 3 Dense Query 构建 — LLM 整合 confirmed/slots/report_findings → dense_query;
-                           sparse_queries 直接照搬 Step 2 产出
+剩 2 步:
 
-LLM 调用两处(Step 1 NER、Step 3 Query),按 §9.1 中安全级模板独立写
-try/except/finally,各自上报 6 指标。
+  Step 1 Sparse 多字段直采 — 不查 terms_collection,纯 state 字段拼接:
+                           chief_complaint + slots 单值字段(location / duration_pattern /
+                           onset_mode)+ slots list 字段(associated_symptoms / aggravating /
+                           relieving / trigger / nature / severity)+ report_findings 的
+                           positive_findings(全加)+ impressions(阴性过滤:含 "(-)" / "正常" /
+                           "阴性" / "未见" / "无异常" 的整条跳过)
+  Step 2 Dense Query 构建 — LLM 整合 confirmed/slots/report_findings → dense_query;
+                           sparse_queries 直接照搬 Step 1 产出
+
+LLM 调用 1 处(Step 2 Query),按 §9.1 中安全级模板独立写 try/except/finally + 6 指标。
 """
 from __future__ import annotations
 
@@ -29,25 +29,21 @@ import re
 import time
 
 from config.settings import settings
-from src.agent.schemas.ner import NERResult
 from src.agent.schemas.query_construction import QueryConstructionOutput
 from src.agent.state import SLOT_UNKNOWN_SENTINEL, MedicalState
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
 from src.models.llm_client import get_llm
-from src.prompts.agent import (
-    build_ner_prompt,
-    build_query_construction_prompt,
-)
+from src.prompts.agent import build_query_construction_prompt
 
 
-# Step 2 阴性 impressions 过滤:含此类字样的 impressions 整条视为阴性,跳过(BM25 不懂否定)
+# Step 1 阴性 impressions 过滤:含此类字样的 impressions 整条视为阴性,跳过(BM25 不懂否定)
 _NEGATIVE_IMPRESSION_RE = re.compile(r"\(-\)|正常|阴性|未见|无异常")
 
-# Step 2 slots 单值字段(每条 strip 后长度 ≥ 2 入 sparse)
+# Step 1 slots 单值字段(每条 strip 后长度 ≥ 2 入 sparse)
 _SLOT_SCALAR_FIELDS = (
     "location", "duration_pattern", "onset_mode",
 )
-# Step 2 slots list 字段(每条独立成袋)
+# Step 1 slots list 字段(每条独立成袋)
 # 2026-05-22:trigger/nature/severity 从 SCALAR 迁过来(schema 改 list[str] 后)
 _SLOT_LIST_FIELDS = (
     "associated_symptoms", "aggravating", "relieving",
@@ -59,37 +55,7 @@ _logger = logging.getLogger(__name__)
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# Step 1: NER 调用包装(裸 §9.1 模板)
-# ────────────────────────────────────────────────────────────────────────────
-
-
-def _call_ner(text: str) -> NERResult:
-    node, schema = "build_query_step1_ner", "NERResult"
-    _attempts.labels(node=node, schema=schema).inc()
-    t0 = time.perf_counter()
-    try:
-        chain = get_llm().with_structured_output(NERResult, method="json_mode").with_retry(stop_after_attempt=3)
-        return chain.invoke(
-            build_ner_prompt(text),
-            config={
-                "callbacks": [retry_observer],
-                "metadata": {"node": node, "schema": schema},
-            },
-        )
-    except Exception as e:
-        _failures.labels(
-            node=node, schema=schema, exception_type=type(e).__name__
-        ).inc()
-        _logger.error("[%s] NER failed: %s", node, e, exc_info=True)
-        raise
-    finally:
-        elapsed = time.perf_counter() - t0
-        _latency.labels(node=node, schema=schema).observe(elapsed)
-        _logger.info("[%s] elapsed=%.2fs", node, elapsed)
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Step 3: Query 构建调用包装(裸 §9.1 模板)
+# Step 2: Dense Query 构建调用包装(裸 §9.1 模板)
 # ────────────────────────────────────────────────────────────────────────────
 
 
@@ -100,11 +66,17 @@ def _call_query_construction(
     report_impressions: list[str],
     filled_slots: dict,
 ) -> QueryConstructionOutput:
-    node, schema = "build_query_step3_query", "QueryConstructionOutput"
+    # 2026-05-24 sprint:NER 删除后此调用是 Step 2(原 Step 3);并切 flash
+    # (dense_query 改写是翻译+整合性任务,不需 reasoner 深度,flash 实测 5~15s vs pro ~85s)
+    node, schema = "build_query_step2_query", "QueryConstructionOutput"
     _attempts.labels(node=node, schema=schema).inc()
     t0 = time.perf_counter()
     try:
-        chain = get_llm().with_structured_output(QueryConstructionOutput, method="json_mode").with_retry(stop_after_attempt=3)
+        chain = (
+            get_llm(model=settings.llm.FAST_MODEL_NAME)
+            .with_structured_output(QueryConstructionOutput, method="json_mode")
+            .with_retry(stop_after_attempt=3)
+        )
         return chain.invoke(
             build_query_construction_prompt(
                 confirmed_symptoms=confirmed_symptoms,
@@ -153,59 +125,16 @@ def _summarize_history(history: dict) -> str:
 
 
 def build_query(state: MedicalState) -> dict:
-    """三步执行;若检查路径(followup_round == last_nlu_round)直接跳到 Step 3。"""
-    is_first_round = state.followup_round == 0
-    is_check_path = (
-        not is_first_round and state.followup_round == state.last_nlu_round
-    )
+    """两步执行:Step 1 sparse 词袋(确定性)+ Step 2 dense_query LLM 改写。
 
+    2026-05-24:删 Step 1 NER(冗余,详见模块 docstring)。confirmed/denied/uncertain 直接
+    透传 state(由 ① / ⓪a + intake_followup_ask / ⑦ 三个采集节点维护)。
+    """
     confirmed_symptoms = list(state.confirmed_symptoms)
     denied_symptoms = list(state.denied_symptoms)
     uncertain_symptoms = list(state.uncertain_symptoms)
 
-    # ─── Step 1: NER(check path 跳过,首轮对 chief+present,后续轮对 answer)───
-    if not is_check_path:
-        if is_first_round:
-            ner_text = (
-                f"{state.chief_complaint}\n{state.present_illness}".strip()
-            )
-        else:
-            ner_text = state.followup_answer or ""
-
-        ner_text = ner_text.strip()
-        if ner_text:
-            ner_result = _call_ner(ner_text)
-            entities = ner_result.entities
-        else:
-            entities = []
-
-        # 首轮主诉症状初始化:symptom 类(temporality=current)按 certainty 三分流
-        # 直接用 NER 原文(无 EL,不做归一化);下游 LLM 能处理口语形式
-        if is_first_round:
-            for ent in entities:
-                if ent.entity_type != "symptom":
-                    continue
-                if ent.temporality != "current":
-                    continue
-                text = (ent.text or "").strip()
-                if not text:
-                    continue
-                # 已在任一已知列表里 → 不重写(各列表内部仅做幂等去重)
-                already_known = (
-                    text in confirmed_symptoms
-                    or text in denied_symptoms
-                    or text in uncertain_symptoms
-                )
-                if already_known:
-                    continue
-                if ent.certainty == "denied":
-                    denied_symptoms.append(text)
-                elif ent.certainty == "uncertain":
-                    uncertain_symptoms.append(text)
-                else:  # confirmed (default)
-                    confirmed_symptoms.append(text)
-
-    # ─── Step 2: Sparse 多字段直采(确定性,无 LLM,RETRIEVAL_EVAL §2)───
+    # ─── Step 1: Sparse 多字段直采(确定性,无 LLM,RETRIEVAL_EVAL §2)───
     # 来源 A:state 多字段(chief_complaint + slots 单值 + slots list)
     # 来源 B:report_findings 的 positive_findings(全加)+ impressions(阴性过滤)
     sparse_queries: list[str] = []
@@ -232,7 +161,7 @@ def build_query(state: MedicalState) -> dict:
         for item in slots_dict.get(field) or []:
             _add(item)
 
-    # 来源 B — report_findings;report_pos / report_imp 同时供 Step 3 LLM dense_query 改写
+    # 来源 B — report_findings;report_pos / report_imp 同时供 Step 2 LLM dense_query 改写
     report_pos: list[str] = []
     report_imp: list[str] = []
     for f in state.report_findings:
@@ -249,7 +178,7 @@ def build_query(state: MedicalState) -> dict:
     # 保序去重
     sparse_queries = list(dict.fromkeys(sparse_queries))
 
-    # ─── Step 3: Query 构建(LLM)───
+    # ─── Step 2: Query 构建(LLM)───
 
     # 给 dense_query 改写 LLM 的 filled_slots:剥掉哨兵单值,多值列表过滤哨兵元素。
     # 哨兵=已问无答,对检索改写没意义(诊断 prompt 那边会另带哨兵进 LLM 解释语义)
@@ -276,17 +205,11 @@ def build_query(state: MedicalState) -> dict:
         filled_slots=filled_slots,
     )
 
-    update = {
+    return {
         "confirmed_symptoms": confirmed_symptoms,
         "denied_symptoms": denied_symptoms,
         "uncertain_symptoms": uncertain_symptoms,
         "dense_query": qc.dense_query,
-        # sparse_queries 由 Step 2 确定性产出,LLM 不参与(详见 QueryConstructionOutput docstring)
+        # sparse_queries 由 Step 1 确定性产出,LLM 不参与(详见 QueryConstructionOutput docstring)
         "sparse_queries": sparse_queries,
     }
-
-    # NER 已执行 → 推进游标(spec §4.1.2 ② Step 1)
-    if not is_check_path:
-        update["last_nlu_round"] = state.followup_round
-
-    return update

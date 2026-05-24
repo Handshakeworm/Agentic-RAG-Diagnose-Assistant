@@ -107,17 +107,17 @@ def test_skip_llm_failure_returns_empty_findings_does_not_raise(_msg, mock_llm_f
 # ─── 上传路径(resume = list[group dict] → 真调 parse_reports + hint) ────
 
 
-@patch("src.agent.nodes.analyze_initial_reports.parse_reports")
+@patch("src.agent.nodes.analyze_initial_reports.parse_reports_parallel")
 @patch("src.agent.nodes.analyze_initial_reports.load_initial_exam_reports")
 @patch("src.agent.nodes.analyze_initial_reports.interrupt")
-def test_upload_single_group_calls_parse_with_hint(mock_interrupt, mock_load, mock_parse):
-    """单组 uploaded → parse_reports 被调,hint 含 group_label,**不**走 PG fallback。"""
+def test_upload_single_group_calls_parse_with_hint(mock_interrupt, mock_load, mock_parallel):
+    """单组 uploaded → parse_reports_parallel 单 task 调一次,hint 含 group_label,**不**走 PG fallback。"""
     from src.agent.nodes.analyze_initial_reports import analyze_initial_reports
 
     mock_interrupt.return_value = [
         {"group_label": "血常规", "files": ["/uploads/blood1.jpg", "/uploads/blood2.jpg"], "status": "uploaded"},
     ]
-    mock_parse.return_value = [
+    mock_parallel.return_value = [[
         {
             "report_type": "blood_routine",
             "report_date": "2026-05-10",
@@ -127,20 +127,20 @@ def test_upload_single_group_calls_parse_with_hint(mock_interrupt, mock_load, mo
             "positive_findings": ["白细胞升高"],
             "negative_findings": [],
         },
-    ]
+    ]]
 
     s = create_initial_state(patient_id="P", patient_input="腹痛")
     update = analyze_initial_reports(s)
 
     # PG fallback 不该被触发
     mock_load.assert_not_called()
-    # parse_reports 被调一次,files = group.files,hint 含 group_label
-    mock_parse.assert_called_once()
-    call_kwargs = mock_parse.call_args.kwargs
-    call_args = mock_parse.call_args.args
-    files_arg = call_args[0] if call_args else call_kwargs.get("file_refs")
-    assert files_arg == ["/uploads/blood1.jpg", "/uploads/blood2.jpg"]
-    assert "血常规" in (call_kwargs.get("hint") or "")
+    # parse_reports_parallel 调一次,tasks=[(files, hint)] 单 task
+    mock_parallel.assert_called_once()
+    tasks = mock_parallel.call_args.args[0]
+    assert len(tasks) == 1
+    files, hint = tasks[0]
+    assert files == ["/uploads/blood1.jpg", "/uploads/blood2.jpg"]
+    assert "血常规" in (hint or "")
 
     # exam_reports 每项带 group_label
     assert update["exam_reports"] == [
@@ -152,11 +152,11 @@ def test_upload_single_group_calls_parse_with_hint(mock_interrupt, mock_load, mo
     assert update["report_findings"][0]["report_index"] == 0
 
 
-@patch("src.agent.nodes.analyze_initial_reports.parse_reports")
+@patch("src.agent.nodes.analyze_initial_reports.parse_reports_parallel")
 @patch("src.agent.nodes.analyze_initial_reports.load_initial_exam_reports")
 @patch("src.agent.nodes.analyze_initial_reports.interrupt")
-def test_upload_multiple_groups_some_skipped(mock_interrupt, mock_load, mock_parse):
-    """多组上传,其中一组 status=skipped → 只解析非 skipped 的组,report_index 跨组连续。"""
+def test_upload_multiple_groups_some_skipped(mock_interrupt, mock_load, mock_parallel):
+    """多组上传,其中一组 status=skipped → 并行 parse 只跑非 skipped 的组,report_index 跨组连续。"""
     from src.agent.nodes.analyze_initial_reports import analyze_initial_reports
 
     mock_interrupt.return_value = [
@@ -164,8 +164,8 @@ def test_upload_multiple_groups_some_skipped(mock_interrupt, mock_load, mock_par
         {"group_label": "B超", "files": [], "status": "skipped"},  # skipped 跳过
         {"group_label": "心电图", "files": ["/uploads/ecg.pdf"], "status": "uploaded"},
     ]
-    # parse_reports 每次调用返回 1 个 finding(report_index 来自 parse_reports 内部,这里 mock 给固定值)
-    mock_parse.side_effect = [
+    # parse_reports_parallel 返回与 tasks 等长的 list[list[finding]](顺序同 tasks)
+    mock_parallel.return_value = [
         [{"report_type": "blood_routine", "report_index": 0, "impressions": ["白细胞升高"]}],
         [{"report_type": "ecg", "report_index": 0, "impressions": ["窦性心律"]}],
     ]
@@ -174,7 +174,9 @@ def test_upload_multiple_groups_some_skipped(mock_interrupt, mock_load, mock_par
     update = analyze_initial_reports(s)
 
     mock_load.assert_not_called()
-    assert mock_parse.call_count == 2  # B超 skipped 不调
+    # 只有 2 个 task(B超 skipped 不进 tasks)
+    tasks = mock_parallel.call_args.args[0]
+    assert len(tasks) == 2
 
     # exam_reports 只有 2 项(血常规 + 心电图,B超 跳过)
     assert len(update["exam_reports"]) == 2
@@ -190,26 +192,28 @@ def test_upload_multiple_groups_some_skipped(mock_interrupt, mock_load, mock_par
     assert findings[1]["group_label"] == "心电图"
 
 
-@patch("src.agent.nodes.analyze_initial_reports.parse_reports")
+@patch("src.agent.nodes.analyze_initial_reports.parse_reports_parallel")
 @patch("src.agent.nodes.analyze_initial_reports.load_initial_exam_reports")
 @patch("src.agent.nodes.analyze_initial_reports.interrupt")
-def test_upload_group_without_label_still_parses(mock_interrupt, mock_load, mock_parse):
+def test_upload_group_without_label_still_parses(mock_interrupt, mock_load, mock_parallel):
     """group_label 为空(患者没填标签)→ 仍解析,hint=None,exam_reports 不带 group_label。"""
     from src.agent.nodes.analyze_initial_reports import analyze_initial_reports
 
     mock_interrupt.return_value = [
         {"group_label": "", "files": ["/uploads/unknown.pdf"], "status": "uploaded"},
     ]
-    mock_parse.return_value = [
+    mock_parallel.return_value = [[
         {"report_type": "other", "report_index": 0, "impressions": ["未知"]},
-    ]
+    ]]
 
     s = create_initial_state(patient_id="P", patient_input="腹痛")
     update = analyze_initial_reports(s)
 
     mock_load.assert_not_called()
     # hint 应为 None(label 空)
-    assert mock_parse.call_args.kwargs.get("hint") is None
+    tasks = mock_parallel.call_args.args[0]
+    _files, hint = tasks[0]
+    assert hint is None
     # exam_reports 不带 group_label key
     assert update["exam_reports"] == [{"file_ref": "/uploads/unknown.pdf"}]
     # finding 也不带 group_label

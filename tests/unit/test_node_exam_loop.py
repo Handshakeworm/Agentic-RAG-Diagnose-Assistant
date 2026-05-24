@@ -147,11 +147,12 @@ def test_wait_exam_report_calls_interrupt(mock_interrupt):
 # ⑨ process_exam_result
 
 
-@patch("src.agent.nodes.process_exam_result.parse_reports")
-def test_process_exam_result_appends_reports_and_findings(mock_parse):
+@patch("src.agent.nodes.process_exam_result.parse_reports_parallel")
+def test_process_exam_result_appends_reports_and_findings(mock_parallel):
+    """2026-05-24:⑨ 改为并行调 parse_reports_parallel(tasks → list[list[finding]])。"""
     from src.agent.nodes.process_exam_result import process_exam_result
 
-    mock_parse.return_value = [
+    mock_parallel.return_value = [[
         {
             "report_type": "imaging",
             "report_date": "2026-05-12",
@@ -161,7 +162,7 @@ def test_process_exam_result_appends_reports_and_findings(mock_parse):
             "positive_findings": ["胆囊壁增厚"],
             "negative_findings": [],
         }
-    ]
+    ]]
 
     # 2026-05-22:pending_exam_results 改成 group 结构 [{group_label, files, status}]
     s = create_initial_state(patient_id="P", patient_input="x")
@@ -179,11 +180,14 @@ def test_process_exam_result_appends_reports_and_findings(mock_parse):
     assert update["report_findings"][0]["report_index"] == 1  # base + 0
     assert update["report_findings"][0]["group_label"] == "腹部 B 超"
     assert update["pending_exam_results"] == []
-    # 验证 hint 透传给 parse_reports
-    call_kwargs = mock_parse.call_args.kwargs
-    assert "腹部 B 超" in call_kwargs.get("hint", "")
-    assert "腹部超声" in call_kwargs.get("hint", "")
-    assert "需空腹" in call_kwargs.get("hint", "")
+    # 验证 task 传参:[(files, hint)] 单组,hint 含 label+items+note
+    tasks = mock_parallel.call_args.args[0]
+    assert len(tasks) == 1
+    files, hint = tasks[0]
+    assert files == ["/new/lab.pdf"]
+    assert "腹部 B 超" in (hint or "")
+    assert "腹部超声" in (hint or "")
+    assert "需空腹" in (hint or "")
 
 
 def test_process_exam_result_empty_pending_returns_empty():

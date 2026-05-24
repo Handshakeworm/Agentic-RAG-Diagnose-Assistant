@@ -164,6 +164,7 @@ def _llm_holistic_gate_flash(state: MedicalState) -> HolisticGateDecision:
         denied_symptoms=list(state.denied_symptoms),
         uncertain_symptoms=list(state.uncertain_symptoms),
         medical_history_summary=_summarize_history(state.medical_history),
+        asked_targets=list(state.asked_targets),  # L2:硬去重列表
         quota=settings.agent_limits.MAX_FOLLOWUP_QUESTIONS,
     )
 
@@ -300,10 +301,15 @@ def generate_followup(state: MedicalState) -> dict:
         # 否则 UI 显示"(无问题文本)"
         questions.append({"type": "open", "question": _OPEN_TEMPLATE})
         text = _build_text(questions)
+        # L2:本轮出过的 target 追加到 state.asked_targets(去重),Step A 下轮注入硬去重
+        new_targets = [q.target for q in askable_items if (q.target or "").strip()]
+        seen = set(state.asked_targets)
+        merged_asked = list(state.asked_targets) + [t for t in new_targets if t not in seen]
         return {
             "followup_questions": questions,
             "followup_question": text,
             "unaskable_symptoms": unaskable_dump,
+            "asked_targets": merged_asked,
         }
 
     if unaskable_items:
