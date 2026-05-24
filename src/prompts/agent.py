@@ -174,35 +174,9 @@ def build_report_parsing_prompt(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-# ② build_query Step 1 / 2 / 4
+# ② build_query — 2026-05-24 删 Step 1 NER(冗余,详见 build_query.py docstring),
+#                  现仅剩 Step 1 sparse 直采(无 LLM)+ Step 2 dense_query 改写
 # ────────────────────────────────────────────────────────────────────────────
-
-
-def build_ner_prompt(text: str) -> str:
-    """② build_query Step 1:LLM NER 从文本抽取医学实体。"""
-    return f"""你是医学命名实体识别助手。请从下面的患者陈述中抽取**医学实体**。
-
-【输入文本】
-{text}
-
-【实体类型】(entity_type 取值)
-- symptom(症状):如"头痛"、"恶心"、"胸闷"
-- disease(疾病):如"糖尿病"、"高血压"
-- drug(药物):如"二甲双胍"、"奥美拉唑"
-- anatomy(解剖部位):如"右上腹"、"胸骨后"
-
-【字段说明】
-- text:实体原文(保留患者口语,不归一)
-- entity_type:实体类型(见上)
-- certainty:确定性三态(按患者**语气**判,不要把"模糊"误标成"否认"):
-  - "confirmed":语气肯定提及,如"头痛"/"右上腹疼"
-  - "denied":明确否认,原文带"没"/"不"+症状,如"没头痛"/"不发烧"
-  - "uncertain":模糊/犹豫语气,如"可能头痛"/"好像有点痛"/"不太确定"
-- temporality:时间属性。current(本次/当前) / past(既往) / family(家族)
-- value:量化值,如体温 "38.5°C"、持续时间 "3天";无则 null
-
-不要重复抽取同一实体的不同表述(如同时抽"肚子疼"和"腹痛"),保留患者原始表述即可——
-后续 Step 2 Entity Linking 会做术语标准化。""" + _JSON_TAIL
 
 
 def build_query_construction_prompt(
@@ -212,9 +186,9 @@ def build_query_construction_prompt(
     report_impressions: list[str],
     filled_slots: dict[str, Any],
 ) -> str:
-    """② build_query Step 3:LLM 改写 dense_query(单字段输出)。
+    """② build_query Step 2:LLM 改写 dense_query(单字段输出)。
 
-    Sparse 路词袋由 Step 2 state 多字段直采(chief + slots + report findings)确定性
+    Sparse 路词袋由 Step 1 state 多字段直采(chief + slots + report findings)确定性
     产出,完全不进 LLM 视野;LLM 只负责整合证据成一句语义连贯的 dense 查询。
     """
     slots_lines = [f"  - {k}: {_format_slot_value(v)}" for k, v in filled_slots.items() if v]
@@ -354,8 +328,14 @@ def build_followup_parse_prompt(
             has_history = True
             items_lines.append("  - 入站病史采集:过敏/慢病/长期用药(回填到 history_fills)")
         elif q.get("type") == "targeted":
+            # L1 fix:把 ⑤ Step B 写的 target 短语透传给 LLM,让回填保留纵向语义
+            # (否则 "38度" 只能横向归到 associated_symptoms 丢"最高"定语,
+            #  导致 ⑤ 下轮重复问 + ⑩ 诊断看不到峰值)
+            target = (q.get("target") or "").strip()
+            target_hint = f' target="{target}"' if target else ""
             items_lines.append(
-                "  - 针对性追问:新症状回填到 new_symptoms;若答案涉及具体 HPI 维度,顺手回填 slot_fills"
+                f"  - 针对性追问{target_hint}:回填到 confirmed/denied/uncertain;若涉及 HPI 维度,顺手填 slot_fills"
+                f"\n    **必须把 target 的限定词写进 value**(详见解析规则 b4)"
             )
     items_block = "\n".join(items_lines) if items_lines else "  (无)"
 
@@ -461,19 +441,48 @@ def build_followup_parse_prompt(
         - 例 Q="您有没有打寒战?" + A="没有" → denied 加 "寒战"
         - 例 Q="皮肤或眼睛发黄?" + A="无" → denied 加 "皮肤黄染" 和 "巩膜黄染"
         - 关键:answer 没症状名 → 从 question 提靶点,**不要因为 answer 文本里没症状就漏识别**
-     b2. **串联问句多否认**(question 里用'和/或/、/逗号'串联多个鉴别点)—
-         **每个点都要单独写一项**,不要合并成一项,也不要只挑一个写:
+     b2. **多鉴别点合并题**(question 包含多个独立症状/体征鉴别点)—
+         **每个点都要单独写一项**,不要合并成一项,也不要只挑一个写。
+         **识别按语义判,不依赖标点**:句子里出现多个独立症状名/体征词
+         (发热、寒战、恶心、呕吐、尿频、便秘、放射痛等)且都是同性质的疑问对象 → 拆。
+         有标点示例(传统格式):
         - 例 Q="您发烧最高多少度?有没有打寒战?" + A="38度,没寒战"
           → confirmed 加 "发热 38℃",denied 加 "寒战"
         - 例 Q="便秘、腹泻或大便颜色变浅?" + A="无"
           → denied 加 "便秘" + "腹泻" + "大便颜色变浅"
         - 例 Q="尿频、尿急、尿痛或小便颜色异常?" + A="无"
           → denied 加 "尿频" + "尿急" + "尿痛" + "小便颜色异常"
+         **无标点反例(关键!不要因为没标点就合并)**:
+        - 例 Q="您发烧最高多少度有没有打寒战" + A="38度 没寒战"
+          → confirmed 加 "发热 38℃",denied 加 "寒战"
+          (没有问号/逗号,但语义是两个独立鉴别点,**不能合并成"发烧寒战"一项**)
+        - 例 Q="排尿是否有尿频尿急尿痛" + A="无"
+          → denied 加 "尿频" + "尿急" + "尿痛"
+          (3 个症状名无标点串联,拆 3 项,**不能**写 denied=["尿频尿急尿痛"])
+        - 例 Q="伴随有没有恶心呕吐反酸" + A="没有"
+          → denied 加 "恶心" + "呕吐" + "反酸"(无标点,3 个独立症状,**必须拆开**)
+        - 例 Q="疼痛会不会往肩背腰部放射" + A="没有"
+          → denied 加 "肩部放射" + "背部放射" + "腰部放射"(各部位独立写,见 b3)
      b3. **denied/confirmed 写入要带时态/维度后缀**,避免下轮看不出差异:
         - "发热 38℃" 而不是只写"发热"(带量化)
         - "右肩放射" / "背部放射"(各部位独立写)
         - "近期饮酒" 而不是 "饮酒"(史 vs 近期独立)
         - "既往胆囊炎" 而不是 "胆囊炎"(疾病史前缀,跟现症区分)
+     b4. **targeted 题:把 target 的限定词写进 value**(L1 关键规则):
+        items_block 里每个 targeted 题都标了 `target="<中文短语>"`,answer 解析时
+        必须把 target 中的**纵向限定词**(最高 / 最低 / 近期 / 既往 / 放射 / 平时 等)
+        和 answer 拼成完整短语,**不要丢限定词**:
+        - target="发热最高体温" + answer="38度"
+          → confirmed 加 "发热最高 38℃" + slot.associated_symptoms 加 "发热最高 38℃"
+          (**不**写 "发热 38℃" — 丢了"最高",下轮 ⑤ 还会再问;⑩ 也不知是不是峰值)
+        - target="疼痛 NRS 评分" + answer="7-8分"
+          → slot.severity 加 "NRS 7-8 分"(不写 "7-8 分" 让人不知道是疼痛分)
+        - target="近期饮酒" + answer="无"
+          → denied 加 "近期饮酒"(不写 "饮酒",会跟"平时饮酒"史混)
+        - target="既往类似腹痛史" + answer="第一次"
+          → denied 加 "既往类似腹痛"(不写 "类似腹痛")
+        - target="胆石家族史" + answer="无"
+          → history_fills.family_conditions=["胆结石:无"](走 d 规则,带"家族"语义)
      c. **特别例外:type=open 的"还有没有别的不舒服"题**(对应 items_block 里
         "开放式问『还有别的不舒服』"那一条),答"无/没了/没有/没什么"等**只代表
         无新症状补充**,**不要**写到 denied(像 "其他不适"/"其他症状" 这种泛化词
@@ -542,6 +551,7 @@ def build_targeted_followup_prompt(
     denied_symptoms: list[str],
     uncertain_symptoms: list[str],
     medical_history_summary: str,
+    asked_targets: list[str],
     quota: int,
 ) -> str:
     """⑤ Step A(flash 决策)prompt:基于已填 HPI + 病史出**决策**双 list。
@@ -560,6 +570,7 @@ def build_targeted_followup_prompt(
     confirmed_block = "、".join(confirmed_symptoms) or "(无)"
     denied_block = "、".join(denied_symptoms) or "(无)"
     uncertain_block = "、".join(uncertain_symptoms) or "(无)"
+    asked_targets_block = "、".join(asked_targets) or "(无,首轮)"
 
     return f"""你是问诊 holistic gate,**只负责判"还差什么信息",绝不做诊断**。
 你的输出会按"患者能不能答"分两路:
@@ -578,6 +589,8 @@ def build_targeted_followup_prompt(
 - 不确定症状:{uncertain_block}
 - 病史档案摘要:
 {medical_history_summary}
+- **已问过的 target 短语**(L2 硬去重列表,**这些 target 一个字都不能再出现在你的 askable_targets 里**):
+  {asked_targets_block}
 
 【你的任务】
 判断进入检索/诊断前还差什么信息,按"患者能不能答"分两路:
@@ -601,7 +614,12 @@ def build_targeted_followup_prompt(
 3. askable 只列**主观表现**靶点(发热温度、放射部位、加重缓解、伴随表现等)
 4. unaskable 只列**客观证据**(查体/化验/影像/心电图等);**不要把"问患者有没有"放进 unaskable**
 5. 两路不要重复同一个信息(同一项要么 askable 要么 unaskable,不能两边都出)
-6. **去重铁律**:已经出现在【当前已知】任意位置的信息**绝不再问**(因 askable_target 现在
+6. **L2 硬去重铁律(最高优先级,违反即整批输出作废)**:
+   【当前已知】里"已问过的 target 短语"列表中**每一条**,**不能**作为本轮 askable_target 出现,
+   也不能换皮重出(如"发烧最高温度" → 不能改成"发热最高度数"/"体温峰值"/"最高体温多少度"再出);
+   只要语义包含已问 target 的核心含义,一律视为重复,**直接跳过**改出别的 target 或写 []。
+
+7. **去重铁律**:已经出现在【当前已知】任意位置的信息**绝不再问**(因 askable_target 现在
    是中文短语,直接字符串包含/语义重叠就算"已在列表里"):
    - 已填 HPI 维度已经有值的(包括"已问过但患者答不上"的)→ 不要重复
    - 已确认/已否认/不确定症状列表里的症状名 → 不要再问"有没有 X" 也不出 X 的细分变体
@@ -609,7 +627,7 @@ def build_targeted_followup_prompt(
    - 现病史自由文本已经提到的细节(如温度数值、伴随表现)→ 不要再问相同细节
    - 例:已 denied 含"胆石家族史" → askable 不再出"胆石家族史"或"父母兄弟胆结石史"
    - 例:已 denied 含"近期饮酒" → askable 不再出"发作前饮酒"等细分(完全否认已 cover)
-7. 信息已充分时,两个 list 都输出 [] — 不要硬凑
+8. 信息已充分时,两个 list 都输出 [] — 不要硬凑
 
 # 输出格式(严格 JSON,**字段名必须照下方模板原样,不要新造字段名,不要 markdown 代码块包裹,不要解释**)
 
@@ -1085,7 +1103,14 @@ def build_diagnose_prompt(
      得更聚焦,如把"想知道胆囊有无问题"改成"腹部 B 超确认胆囊壁厚度 + 有无结石"
    - **允许新产**:诊断推理后觉得"上游没列但鉴别真需要"的检查项(如 MRCP / 特定肿瘤标志物等),
      可以直接加进 retained_unaskable;但**不要为加而加** — 大多数 case 挑/改写就够
-   - **宁可少留不可多留** — 不该查的留下来会被 ⑧a 直接推给患者""" + _JSON_TAIL
+   - **宁可少留不可多留** — 不该查的留下来会被 ⑧a 直接推给患者
+
+【顶层 JSON 结构(必须严格遵守字段名)】
+{{
+  "results": [ ... 候选疾病数组 ... ],
+  "retained_unaskable": [ ... ]
+}}
+**不要**用 "diagnoses" / "candidates" / "disease_list" 等同义词作顶层字段名,只能是 `results`。""" + _JSON_TAIL
 
     # 多模态消息组装:base text + 每张可加载的 figure 截图作 image_url 块
     content: list[dict] = [{"type": "text", "text": prompt_text}]
@@ -1161,9 +1186,12 @@ def build_advice_prompt(
   插入安全约束相关的功能监测)
 - risk_warnings:风险提示与注意事项,**包含**:
   - 高危场景警告(如疑似心梗/脑卒中)
-  - safety_constraints.contraindication_flags 的患者侧解释
-  - 系统失败提示对应的患者侧告知(如 followup_round_capped → "建议线下就诊获得
-    更全面评估";step_N_failed → "系统分析出现技术问题,本次结果不可作为依据")
+  - 系统失败提示对应的患者侧告知(如 followup_round_capped → "建议结合线下医生综合
+    评估";step_N_failed → "系统分析出现技术问题,本系统尚处于测试阶段,结果仅供参考")
+  - **不要**写 safety_constraints.contraindication_flags / banned_drugs /
+    interaction_warnings 的患者侧解释 — 那是 ⑪ safety_gate 的活,产出的
+    additional_risks 会被节点代码自动 append 到 risk_warnings,你再写一遍就会
+    跟卡片里 ⑪ 的那条同义重复
 - urgent_flag:疑似心梗/脑卒中/消化道大出血等高危情况 → True
 
 口吻面向普通患者,不要堆砌术语。""" + _JSON_TAIL
@@ -1181,29 +1209,47 @@ def build_format_response_prompt(
     risk_warnings: list[str],
     failure_reason: str | None,
 ) -> str:
-    """⑬ 自由文本最终回复:整合诊断 + 建议 + 免责声明。"""
+    """⑬ 自由文本最终回复(2026-05-24 重写):主诊断 + 其他可能 + 检查 + 风险 + 免责。
+
+    职责定位:用药剂量细节让用药卡承担;⑬ 气泡负责"linear 可读全貌"。
+    - **主诊断**:疾病名 + 全部 evidence 列出(⑩ 本来就精筛过 3-5 条,不再让 LLM 二筛)
+    - **其他可能**:top2+ 只列名 + 概率,**不复述证据**(证据已在 UI 灰字区常驻显示)
+    - **建议检查 / 风险提示**:复述给患者(短文本,linear 阅读有价值)
+    - **用药**:**不复述**(剂量/频次/疗程信息密度大,用药卡更合适)
+    - **免责声明**:折中口径,每次都写
+    """
     diag_block = json.dumps(diagnosis_results[:3], ensure_ascii=False)
-    med_block = json.dumps(medication_advice, ensure_ascii=False)
-    tests_block = json.dumps(recommended_tests, ensure_ascii=False)
-    risk_block = json.dumps(risk_warnings, ensure_ascii=False)
+    tests_block = json.dumps(recommended_tests, ensure_ascii=False) if recommended_tests else "[]"
+    risk_block = json.dumps(risk_warnings, ensure_ascii=False) if risk_warnings else "[]"
+    has_others = len(diagnosis_results) > 1
+    has_tests = bool(recommended_tests)
+    has_risks = bool(risk_warnings)
 
     failure_disclaimer = ""
     if failure_reason:
         failure_disclaimer = (
-            "\n本次诊断因系统原因未能完整推理,结果仅供参考,请务必线下就诊。"
+            "\n另:本次诊断因系统原因未能完整推理。本系统尚处于探索和测试阶段,"
+            "结果仅供参考,建议结合线下医生综合评估。"
         )
 
-    return f"""你是医院分诊台问诊助手。请把下列结构化结果整合成一段**患者可读**的自然语言回复。
+    return f"""你是医院分诊台问诊助手。请把下列诊断结果改写成一段**患者可读**的回复。
 
-【诊断】{diag_block}
-【用药】{med_block}
+【诊断结果】{diag_block}
 【建议检查】{tests_block}
 【风险提示】{risk_block}
 
-【回复结构】
-1. 一段简短诊断说明(候选疾病 + 大致可能性,口语化,不直接报概率数字)
-2. 用药 / 检查 / 注意事项,分点说明
-3. 风险提示(若有 urgent_flag → 强烈建议立即就医放到最前)
-4. 免责声明:本结果仅作分诊参考,不代替线下医生诊断;具体方案请咨询执业医师{failure_disclaimer}
+【回复结构(严格按顺序,缺数据的段省略;**每段以 markdown 粗体标题开头**,如 `**建议检查**:...`,渲染时会显示成黑体标题让患者一眼区分)】
+1. **主诊断 + 证据**(**首段不加标题**,直接开口):1 句告诉患者"看起来最可能是 X"(可加把握度形容词:很可能/比较像/初步判断,**不要报概率数字**);然后用 "本次判断的依据:..." 引出 evidence 列表,**把 ⑩ 给的全部 evidence 列全**(用分号或逗号串接,不要二次精简)
+2. **其他可能**({"有" if has_others else "无"}):若有 top2+,以 `**其他可能**:` 开头,用 1-2 句说"另外也不能完全排除:Y(可能性约 N%)、Z(约 M%)";**不要复述这些次选的证据**(UI 已经在下方灰字区显示)
+3. **建议检查**({"有" if has_tests else "无"}):若有,以 `**建议检查**:` 开头,列出来,1-2 句解释"为什么建议查这些"
+4. **风险提示**({"有" if has_risks else "无"}):若有,以 `**风险提示**:` 开头列出来;若含紧急情况(如疑似心梗/脑卒中/消化道大出血)**放最前**用 `**⚠️ 紧急建议**:...` 单独成段强调(标题改成"紧急建议")
+5. **免责声明**:以 `**免责声明**:` 开头。本系统目前仍处于探索和测试阶段,结果仅作分诊参考,尚不能完全替代医生;具体方案请结合执业医师诊断{failure_disclaimer}
 
-整段控制在 200-400 字。"""
+**禁止事项**:
+- 不要列具体药名 / 剂量 / 频次 / 疗程 — 这些已经在用药卡里,复述会让患者眼花
+- 不要报主诊断的概率数字(用形容词),但**其他可能性必须报概率**(让患者感知次选有多大可能)
+- 不要堆砌医学术语;evidence 里的化验数值/影像描述按原样保留(如 "白细胞 15.8 升高")
+- 不要在气泡里说"请查看下方卡片"之类引导文案 — UI 自己会展示
+- **段标题之间空一行**(markdown 段落分隔),避免几段文字粘在一起
+
+整段控制在 **200-380 字**。"""
