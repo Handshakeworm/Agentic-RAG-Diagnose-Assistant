@@ -67,7 +67,7 @@ _NODE_PROGRESS_TEXT: dict[str, str] = {
     "build_query":                   "正在构造检索查询…",
     "retrieve":                      "正在检索医学知识库…",
     "select_discriminative_symptom": "正在分析关键症状…",
-    "diagnose":                      "正在综合诊断(三步推理)…",
+    "diagnose":                      "正在综合诊断…",
     "recommend_exam":                "正在评估需要的检查…",
     "process_exam_result":           "正在处理检查结果…",
     "safety_gate":                   "正在做安全核查…",
@@ -82,6 +82,107 @@ _NODE_PROGRESS_TEXT: dict[str, str] = {
 _CUSTOM_STEP_PROGRESS_TEXT: dict[str, str] = {
     "intake_translate_answers": "正在处理回答…",  # intake 4 batch 收完后调 parse_followup_response 前
     "step_b_question_gen":      "正在生成追问…",  # ⑤ Step A 决策完,Step B flash 拼问句前
+}
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# D 方案(2026-05-24):节点完成时抽中间产物计数 → SSE node_done event
+# 让用户在等长节点(⑩ diagnose 2~3 分钟)时看到 agent 实际产出,等待感大降
+# ────────────────────────────────────────────────────────────────────────────
+
+
+def _summary_info_collect(out: dict) -> str:
+    n_conf = len(out.get("confirmed_symptoms") or [])
+    n_deny = len(out.get("denied_symptoms") or [])
+    slots = out.get("present_illness_slots")
+    n_slots = sum(
+        1 for v in (slots.model_dump() if hasattr(slots, "model_dump") else (slots or {})).values()
+        if v not in (None, "", [], {})
+    ) if slots else 0
+    return f"已识别 {n_conf} 个症状 / 否认 {n_deny} 个,HPI 12 维填了 {n_slots} 个"
+
+
+def _summary_analyze_reports(out: dict) -> str:
+    n_reports = len(out.get("exam_reports") or [])
+    n_findings = len(out.get("report_findings") or [])
+    if not n_reports:
+        return "未上传报告,跳过"
+    return f"已分析 {n_reports} 张报告,提取 {n_findings} 条关键发现"
+
+
+def _summary_build_query(out: dict) -> str:
+    n_sparse = len(out.get("sparse_queries") or [])
+    has_dense = bool(out.get("dense_query"))
+    parts = [f"构造 {n_sparse} 个稀疏检索词"]
+    if has_dense:
+        parts.append("已生成 dense 语义查询")
+    return ",".join(parts)
+
+
+def _summary_retrieve(out: dict) -> str:
+    n = len(out.get("candidate_chunks") or [])
+    return f"已召回 {n} 篇文献候选"
+
+
+def _summary_select_symptom(out: dict) -> str:
+    qs = out.get("followup_questions") or []
+    if not qs:
+        return "信息已足,无需追问"
+    return f"已选 {len(qs)} 个待追问目标"
+
+
+def _summary_generate_followup(out: dict) -> str:
+    qs = out.get("followup_questions") or []
+    if not qs:
+        return "无需追问,准备进入诊断"
+    return f"已生成 {len(qs)} 个追问问题"
+
+
+def _summary_process_followup(out: dict) -> str:
+    n_conf = len(out.get("confirmed_symptoms") or [])
+    n_deny = len(out.get("denied_symptoms") or [])
+    return f"已解析回答(累计确认 {n_conf} 个症状 / 否认 {n_deny} 个)"
+
+
+def _summary_recommend_exam(out: dict) -> str:
+    groups = out.get("recommended_test_groups") or []
+    if not groups:
+        return "无需补充检查"
+    return f"已推荐 {len(groups)} 组检查"
+
+
+def _summary_process_exam_result(out: dict) -> str:
+    reports = out.get("exam_reports") or []
+    findings = out.get("report_findings") or []
+    return f"已累计 {len(reports)} 张报告 / {len(findings)} 条结构化发现"
+
+
+def _summary_diagnose(out: dict) -> str:
+    diags = out.get("diagnosis_result") or []
+    if not diags:
+        return "诊断结果待生成"
+    # 取 top1 给点信号(成功路径)
+    top = diags[0]
+    name = top.get("disease") or "未知"
+    prob = top.get("probability")
+    if isinstance(prob, (int, float)) and prob > 0:
+        return f"诊断完成 — 最可能:{name}({prob * 100:.0f}%),共 {len(diags)} 个候选"
+    return f"已生成 {len(diags)} 个候选(含失败兜底)"
+
+
+# node name → callable(output dict) -> str
+_NODE_DONE_SUMMARY: dict[str, callable] = {
+    "info_collect":                  _summary_info_collect,
+    "analyze_initial_reports":       _summary_analyze_reports,
+    "build_query":                   _summary_build_query,
+    "retrieve":                      _summary_retrieve,
+    "select_discriminative_symptom": _summary_select_symptom,
+    "generate_followup":             _summary_generate_followup,
+    "process_followup_answer":       _summary_process_followup,
+    "recommend_exam":                _summary_recommend_exam,
+    "process_exam_result":           _summary_process_exam_result,
+    "diagnose":                      _summary_diagnose,
+    # ⑪/⑫/⑬ 出口快(≤10s),不再额外推 done 避免噪音
 }
 
 
@@ -214,6 +315,23 @@ async def diagnose(
                     text = _CUSTOM_STEP_PROGRESS_TEXT.get(step)
                     if text:
                         yield _sse({"event": "progress", "node": step, "text": text})
+                elif ev_type == "on_chain_end":
+                    # D 方案:节点完成时抽中间产物计数推 SSE node_done event
+                    # (subgraph 内部 chain 也会触发,只对 _NODE_DONE_SUMMARY 里 mapping 的 node 推)
+                    name = ev.get("name") or ""
+                    summarizer = _NODE_DONE_SUMMARY.get(name)
+                    if summarizer is None:
+                        continue
+                    out = (ev.get("data") or {}).get("output")
+                    # output 可能是 dict(节点 return 值)或 None(中断节点)
+                    if not isinstance(out, dict):
+                        continue
+                    try:
+                        summary_text = summarizer(out)
+                    except Exception as _e:  # 不影响主流程
+                        continue
+                    if summary_text:
+                        yield _sse({"event": "node_done", "node": name, "summary": summary_text})
 
             invoke_latency_ms = int((time.perf_counter() - t0) * 1000)
 

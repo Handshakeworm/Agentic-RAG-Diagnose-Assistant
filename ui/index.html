@@ -126,7 +126,7 @@
     </div>
 
     <p class="text-xs text-slate-400 text-center mt-6">
-      仅用于功能演示;**所有 AI 输出不构成医疗建议**,真实就医请咨询执业医师。
+      本系统尚处于探索和测试阶段,AI 输出仅作分诊参考,尚不能完全替代医生;真实就医请结合执业医师诊断。
     </p>
   </div>
 </main>
@@ -212,14 +212,15 @@
                               title="移除此份报告">× 移除</button>
                     </div>
                     <div class="flex items-center gap-2 flex-wrap">
-                      <button @click="$refs['fileInputForm_' + qi + '_' + gi]?.click()"
+                      <button @click="document.getElementById('fileInputForm_' + qi + '_' + gi)?.click()"
                               class="inline-flex items-center gap-1.5 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg px-3 py-1.5 text-xs hover:bg-indigo-100 transition">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                         </svg>
                         选择文件
                       </button>
-                      <input type="file" :x-ref="'fileInputForm_' + qi + '_' + gi" class="hidden"
+                      <!-- Alpine :x-ref 不支持动态绑定,改用原生 :id + getElementById -->
+                      <input type="file" :id="'fileInputForm_' + qi + '_' + gi" class="hidden"
                              accept="image/*,application/pdf" multiple
                              @change="onReportGroupFilesPicked(qi, gi, $event)">
                       <span class="text-xs text-slate-400">PDF 选 1 个 / 图片可多张</span>
@@ -250,8 +251,46 @@
               </div>
             </template>
 
+            <!-- treatments slot 专用:分框模式(每框 1 条 "<药/治疗>: <反应>",符合后端 list[str] 半结构化) -->
+            <template x-if="q.type === 'slot' && q.slot === 'treatments'">
+              <div class="space-y-2">
+                <template x-for="(e, ei) in (formAnswers[qi]?.entries || [{drug: '', response: ''}])" :key="ei">
+                  <div class="border border-slate-200 rounded-lg p-2.5 bg-slate-50/40 space-y-1.5">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-slate-500 shrink-0" x-text="'第 ' + (ei + 1) + ' 条'"></span>
+                      <button x-show="(formAnswers[qi]?.entries || []).length > 1"
+                              @click="removeTreatmentEntry(qi, ei)"
+                              class="ml-auto text-xs text-slate-400 hover:text-rose-600 shrink-0">× 移除</button>
+                    </div>
+                    <div class="flex gap-2">
+                      <input type="text" :value="e.drug"
+                             @input="setTreatmentField(qi, ei, 'drug', $event.target.value)"
+                             placeholder="用了什么(药 / 热敷 / 休息...)"
+                             class="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-400 bg-white">
+                      <input type="text" :value="e.response"
+                             @input="setTreatmentField(qi, ei, 'response', $event.target.value)"
+                             placeholder="反应(无效 / 部分缓解 / 加重...)"
+                             class="flex-1 border border-slate-200 rounded-md px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-400 bg-white">
+                    </div>
+                  </div>
+                </template>
+                <div class="flex items-center gap-2 flex-wrap">
+                  <button @click="addTreatmentEntry(qi)"
+                          class="text-xs bg-white hover:bg-slate-50 text-indigo-600 border border-indigo-200 rounded-lg px-3 py-1 transition">
+                    + 添加更多
+                  </button>
+                  <button @click="formAnswers[qi] = { entries: [], skip: true }"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">无</button>
+                  <button @click="formAnswers[qi] = { entries: [], unknown: true }"
+                          class="text-xs bg-slate-50 hover:bg-slate-100 text-slate-600 border border-slate-200 rounded-full px-2.5 py-0.5">不清楚</button>
+                </div>
+                <p x-show="formAnswers[qi]?.skip" class="text-xs text-slate-400">未自行处理</p>
+                <p x-show="formAnswers[qi]?.unknown" class="text-xs text-slate-400">已选择不清楚</p>
+              </div>
+            </template>
+
             <!-- 其他 type: 单行/多行文本框 + 快捷"无 / 不清楚"按钮 -->
-            <template x-if="q.type !== 'obstetric' && q.type !== 'report_upload'">
+            <template x-if="q.type !== 'obstetric' && q.type !== 'report_upload' && !(q.type === 'slot' && q.slot === 'treatments')">
               <div class="space-y-1.5">
                 <textarea :value="formAnswers[qi] || ''"
                           @input="formAnswers[qi] = $event.target.value"
@@ -278,47 +317,80 @@
       </div>
     </div>
 
-    <!-- 正在思考(SSE 推 progress 时下方灰字显示当前阶段) -->
+    <!-- 正在思考(SSE 推 progress 时显示当前阶段灰字,node_done 时下方追加中间产物摘要)-->
     <div x-show="thinking" class="flex justify-start fade-in">
-      <div class="bg-white border border-slate-100 rounded-2xl rounded-tl-md shadow-sm px-4 py-3">
+      <div class="bg-white border border-slate-100 rounded-2xl rounded-tl-md shadow-sm px-4 py-3 max-w-[28rem]">
         <div class="flex items-center gap-3">
           <div class="dot-typing"><span></span><span></span><span></span></div>
           <span x-show="currentProgress" x-text="currentProgress"
                 class="text-xs text-slate-400 transition-opacity"></span>
         </div>
+        <!-- D 方案:节点产物计数 -- 用户在 ⑩ 等 2 分钟时能看到 agent 实际做了什么 -->
+        <div x-show="progressDetails" class="mt-1.5 ml-7 text-xs text-slate-500 fade-in"
+             x-text="'✓ ' + progressDetails"></div>
       </div>
     </div>
 
     <!-- 诊断结果卡片(completed 状态) / 推荐检查清单(ongoing_exam 中态) -->
-    <div x-show="diagnosis || (recommendedTests && recommendedTests.length)" class="space-y-4 fade-in">
-      <!-- 诊断疾病列表(只在 completed 真有诊断时显示,避免 ongoing_exam 时显示空框) -->
+    <!-- X3 fix: 父容器条件需含 recommendedTestGroups(后端 ⑧a 走分组 schema,recommendedTests 留给 ⑫ 写) -->
+    <div x-show="diagnosis || (recommendedTests && recommendedTests.length) || (recommendedTestGroups && recommendedTestGroups.length)" class="space-y-4 fade-in">
+      <!-- 诊断结果:top1 突出 + top2+ 默认折叠(2026-05-24 Bug A UI 重设计) -->
       <div x-show="diagnosis && diagnosis.length" class="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
         <div class="px-5 py-4 border-b border-slate-100 flex items-center gap-2">
           <div class="w-2 h-2 bg-indigo-600 rounded-full"></div>
-          <h3 class="text-sm font-semibold">诊断分析</h3>
+          <h3 class="text-sm font-semibold">分诊判断</h3>
         </div>
-        <div class="divide-y divide-slate-100">
-          <template x-for="d in (diagnosis || [])" :key="d.disease">
-            <div class="px-5 py-4">
-              <div class="flex items-baseline justify-between mb-2">
-                <span class="font-medium text-sm" x-text="d.disease"></span>
-                <span class="text-xs text-slate-500" x-text="(d.probability * 100).toFixed(0) + '%'"></span>
-              </div>
-              <div class="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-3">
-                <div class="h-full bg-indigo-500 transition-all"
-                     :style="'width: ' + (d.probability * 100) + '%'"></div>
-              </div>
-              <template x-if="d.evidence && d.evidence.length">
-                <ul class="text-xs text-slate-600 space-y-1 mt-2">
-                  <template x-for="e in d.evidence" :key="e">
+
+        <!-- top1: 主诊断(大字 + 把握度 + 依据列表) -->
+        <template x-if="diagnosis && diagnosis.length">
+          <div class="px-5 py-5">
+            <div class="flex items-baseline gap-2 mb-1">
+              <span class="text-xs text-slate-500" x-text="diagnosisLeadLabel(diagnosis[0])"></span>
+            </div>
+            <div class="flex items-baseline justify-between gap-3 mb-3">
+              <span class="text-lg font-semibold text-slate-900" x-text="diagnosis[0].disease"></span>
+              <span class="text-xs text-slate-500 whitespace-nowrap"
+                    x-text="'把握度 ' + (diagnosis[0].probability * 100).toFixed(0) + '%'"></span>
+            </div>
+            <template x-if="diagnosis[0].evidence && diagnosis[0].evidence.length">
+              <div>
+                <p class="text-xs font-medium text-slate-700 mb-1.5">本次判断依据</p>
+                <ul class="text-xs text-slate-600 space-y-1">
+                  <template x-for="e in diagnosis[0].evidence" :key="e">
                     <li class="flex gap-1.5"><span class="text-indigo-400">·</span><span x-text="e"></span></li>
                   </template>
                 </ul>
+              </div>
+            </template>
+            <p x-show="diagnosis[0].differentiation"
+               class="text-xs text-slate-500 mt-3 pt-3 border-t border-slate-100 italic"
+               x-text="'鉴别要点:' + diagnosis[0].differentiation"></p>
+          </div>
+        </template>
+
+        <!-- top2+: 常驻灰字区(2026-05-24 改:不再折叠,患者直接看,旁边有检查/风险卡引导,不会过度焦虑) -->
+        <template x-if="diagnosis && diagnosis.length > 1">
+          <div class="border-t border-slate-100 bg-slate-50/40 px-5 py-3">
+            <p class="text-[11px] text-slate-400 mb-2 uppercase tracking-wide">其他可能性</p>
+            <div class="space-y-2.5">
+              <template x-for="d in diagnosis.slice(1)" :key="d.disease">
+                <div>
+                  <div class="flex items-baseline justify-between mb-0.5">
+                    <span class="text-xs font-medium text-slate-500" x-text="d.disease"></span>
+                    <span class="text-[11px] text-slate-400" x-text="(d.probability * 100).toFixed(0) + '%'"></span>
+                  </div>
+                  <template x-if="d.evidence && d.evidence.length">
+                    <ul class="text-[11px] text-slate-400 space-y-0.5">
+                      <template x-for="e in d.evidence" :key="e">
+                        <li class="flex gap-1.5"><span class="text-slate-300">·</span><span x-text="e"></span></li>
+                      </template>
+                    </ul>
+                  </template>
+                </div>
               </template>
-              <p x-show="d.differentiation" class="text-xs text-slate-500 mt-2 italic" x-text="'鉴别:' + d.differentiation"></p>
             </div>
-          </template>
-        </div>
+          </div>
+        </template>
       </div>
 
       <!-- 用药建议 -->
@@ -330,10 +402,10 @@
         </div>
         <div class="px-5 py-4 space-y-2">
           <template x-for="m in (medication || [])" :key="JSON.stringify(m)">
-            <div class="text-sm">
-              <div class="font-medium" x-text="m.drug || m.name || JSON.stringify(m)"></div>
-              <div x-show="m.dosage" class="text-xs text-slate-500" x-text="m.dosage"></div>
-              <div x-show="m.reason" class="text-xs text-slate-500 mt-0.5" x-text="m.reason"></div>
+            <div class="text-sm border-l-2 border-emerald-200 pl-3 py-1">
+              <div class="font-medium" x-text="m.drug_name || m.drug || m.name || '(未命名药品)'"></div>
+              <div class="text-xs text-slate-600 mt-0.5" x-text="formatMedicationDose(m)"></div>
+              <div x-show="m.notes" class="text-xs text-slate-500 mt-0.5" x-text="'注意:' + m.notes"></div>
             </div>
           </template>
         </div>
@@ -378,12 +450,13 @@
               </div>
               <!-- 上传按钮 + 跳过按钮 + 已上传文件列表 -->
               <div class="ml-4 flex items-center gap-2 flex-wrap">
-                <button @click="$refs['examFileInput' + gi].click()"
+                <button @click="document.getElementById('examFileInput_' + gi)?.click()"
                         :disabled="examGroupStatus[gi] === 'skipped' || examSubmitting"
                         class="text-xs bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 rounded-full px-3 py-1 transition disabled:opacity-40">
                   📁 上传文件
                 </button>
-                <input type="file" :x-ref="'examFileInput' + gi" class="hidden"
+                <!-- Alpine :x-ref 不支持动态绑定,改用原生 :id + getElementById -->
+                <input type="file" :id="'examFileInput_' + gi" class="hidden"
                        accept="image/*,application/pdf" multiple
                        @change="onExamFilesPicked(gi, $event)">
                 <button @click="toggleExamSkip(gi)"
@@ -514,6 +587,7 @@ function app() {
     inputText: '',
     thinking: false,
     currentProgress: '',  // SSE progress event 推送的当前阶段灰字(thinking=false 时清空)
+    progressDetails: '',  // D 方案:node_done event 推送的当前节点产物摘要(如"已召回 200 篇文献")
     apiError: '',
 
     // ─── 诊断结果 ───
@@ -657,12 +731,13 @@ function app() {
       if (q.type === 'targeted')      return q.question || q.target || '针对性追问';
       if (q.type === 'report_upload') return '检查报告上传';
       if (q.type === 'slot') {
+        // 12 维(HPI sprint:treatment_tried + treatment_response → treatments)
         const m = {
           onset_time: '起病时间', onset_mode: '起病方式', trigger: '诱因',
           location: '部位', nature: '性质', severity: '程度',
           duration_pattern: '时间规律', aggravating: '加重因素', relieving: '缓解因素',
           associated_symptoms: '伴随症状', progression: '病程演变',
-          treatment_tried: '已用治疗', treatment_response: '治疗反应',
+          treatments: '诊疗经过',
         };
         return m[q.slot] || q.slot || 'slot';
       }
@@ -695,6 +770,25 @@ function app() {
             lines.push(`${label}:已上传 ${filled.length} 份 — ${segs.join('、')}`);
           } else if (a?.skip) {
             lines.push(`${label}:无`);
+          }
+        } else if (q.type === 'slot' && q.slot === 'treatments') {
+          // treatments 分框:拼成 "<药>: <反应>、<药>: <反应>" 让 ⑦ 直接按 b3 规则解析进 list
+          if (a?.skip) {
+            lines.push(`${label}:无(未自行处理)`);
+          } else if (a?.unknown) {
+            lines.push(`${label}:不清楚`);
+          } else {
+            const entries = (a?.entries || [])
+              .map(e => {
+                const d = (e.drug || '').trim();
+                const r = (e.response || '').trim();
+                if (!d && !r) return null;
+                if (d && r) return `${d}: ${r}`;
+                if (d) return `${d}: 未提及`;
+                return null;  // 只有反应没药名,无法配对,跳过
+              })
+              .filter(Boolean);
+            if (entries.length) lines.push(`${label}:${entries.join('、')}`);
           }
         } else {
           const text = (a || '').trim();
@@ -758,6 +852,38 @@ function app() {
       list.splice(fi, 1);
       cur.groups[gi].files = list;
       this.formAnswers[qi] = { ...cur };
+    },
+
+    // ─── treatments slot 分框管理(2026-05-23) ──────────────────────────
+    // formAnswers[qi] 结构:{ entries: [{drug, response}], skip: bool, unknown: bool }
+    // 序列化时按 "<药>: <反应>、..." 拼,⑦ b3 规则直接解析进 treatments list
+
+    _ensureTreatmentEntries(qi) {
+      const cur = this.formAnswers[qi];
+      if (cur && Array.isArray(cur.entries)) return cur;
+      const init = { entries: [{ drug: '', response: '' }], skip: false, unknown: false };
+      this.formAnswers[qi] = init;
+      return init;
+    },
+
+    addTreatmentEntry(qi) {
+      const cur = this._ensureTreatmentEntries(qi);
+      cur.entries.push({ drug: '', response: '' });
+      this.formAnswers[qi] = { ...cur, skip: false, unknown: false };
+    },
+
+    removeTreatmentEntry(qi, ei) {
+      const cur = this._ensureTreatmentEntries(qi);
+      if (cur.entries.length <= 1) return;
+      cur.entries.splice(ei, 1);
+      this.formAnswers[qi] = { ...cur };
+    },
+
+    setTreatmentField(qi, ei, field, value) {
+      const cur = this._ensureTreatmentEntries(qi);
+      if (!cur.entries[ei]) return;
+      cur.entries[ei][field] = value;
+      this.formAnswers[qi] = { ...cur, skip: false, unknown: false };
     },
 
     async submitForm() {
@@ -871,6 +997,7 @@ function app() {
       // 走 SSE:fetch + ReadableStream 按行解析 `data: {...}\n\n`;
       // progress event → currentProgress 灰字;interrupt/completed/error → 走原终态逻辑
       this.currentProgress = '';
+      this.progressDetails = '';  // D:每次新请求清空上轮 done 摘要
       let gotTerminal = false;  // 收到 interrupt / completed / error 即视为正常终止
       try {
         const res = await fetch('/diagnose', {
@@ -922,6 +1049,7 @@ function app() {
       } finally {
         this.thinking = false;
         this.currentProgress = '';
+        this.progressDetails = '';
         this.$nextTick(() => this.scrollBottom());
       }
     },
@@ -930,6 +1058,14 @@ function app() {
       // 处理一条 SSE event;返回 true 表示终止 event(用于外层检测意外断流)
       if (evt.event === 'progress') {
         this.currentProgress = evt.text || '';
+        // 新节点开始,清空上一节点的 done 摘要,避免错位
+        this.progressDetails = '';
+        this.$nextTick(() => this.scrollBottom());
+        return false;
+      }
+      if (evt.event === 'node_done') {
+        // D 方案:节点完成时显示中间产物计数,让用户知道 agent 实际做了什么
+        this.progressDetails = evt.summary || '';
         this.$nextTick(() => this.scrollBottom());
         return false;
       }
@@ -945,9 +1081,11 @@ function app() {
             this.formAnswers = {};
           } else {
             this.pendingForm = null;
+            const pqText = evt.pending_question || '(系统未返回问题)';
             this.messages.push({
               role: 'assistant',
-              text: evt.pending_question || '(系统未返回问题)',
+              text: pqText,
+              html: this.mdToHtml(pqText),
             });
           }
         } else if (evt.status === 'ongoing_exam') {
@@ -965,9 +1103,11 @@ function app() {
       }
       if (evt.event === 'completed') {
         this.sessionId = evt.session_id || this.sessionId;
+        const finalText = evt.final_response || '(完成)';
         this.messages.push({
           role: 'assistant',
-          text: evt.final_response || '(完成)',
+          text: finalText,
+          html: this.mdToHtml(finalText),
         });
         this.diagnosis = evt.diagnosis_result || [];
         this.medication = evt.medication_advice || [];
@@ -985,6 +1125,31 @@ function app() {
     autoGrow(el) {
       el.style.height = 'auto';
       el.style.height = Math.min(el.scrollHeight, 128) + 'px';
+    },
+
+    formatMedicationDose(m) {
+      const parts = [];
+      if (m.dosage) parts.push(m.dosage);
+      if (m.frequency) parts.push(m.frequency);
+      if (m.duration) parts.push('疗程 ' + m.duration);
+      return parts.join(' · ');
+    },
+
+    mdToHtml(text) {
+      if (!text) return '';
+      // HTML 转义优先,防 XSS
+      const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+      // 简易 markdown:粗体 / 斜体 / 行内代码 / 列表项前缀
+      return escaped
+        .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+        .replace(/`([^`\n]+)`/g, '<code class="bg-slate-100 px-1 rounded">$1</code>')
+        .replace(/^(\s*)[-•]\s+/gm, '$1· ');
     },
 
     scrollBottom() {
