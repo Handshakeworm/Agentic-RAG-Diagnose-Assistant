@@ -97,7 +97,7 @@ Agentic 工作流下，同一 `patient_input` 在不同 State（`confirmed_sympt
 | `trace_id` | `str (UUID)` | 对应 `rag_trace.trace_id`；G4 endpoint 进入时生成或从 context 读取；Agent 节点内通过 LangGraph `config["metadata"]["trace_id"]` 传递 |
 | `session_id` | `str (UUID)` | 对应 `sessions.session_id` |
 | `patient_id` | `str (UUID)` | 对应 `users.user_id`（患者视角）；admin 接口填 operator 的 user_id |
-| `node` | `str \| null` | Agent 节点名（如 `diagnose_step1`、`build_query_step1_ner`）；非 Agent 路径（admin API / ingestion）为 `null` |
+| `node` | `str \| null` | Agent 节点名（如 `diagnose_step1`、`build_query_step2_query`）；非 Agent 路径（admin API / ingestion）为 `null` |
 | `level` | `str` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `message` | `str` | 日志正文 |
 | `exc_info` | `str \| null` | 异常堆栈（ERROR 级别携带） |

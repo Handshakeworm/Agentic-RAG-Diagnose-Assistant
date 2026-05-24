@@ -689,8 +689,8 @@ Milvus 写入失败时，**不回滚** PostgreSQL 中已写入的 chunk 元数�
 各步骤均在 `build_query` ② 节点内完成，产出 `dense_query`（str）和 `sparse_queries`（list[str]）两个 State 字段，分别作为稠密/稀疏两路的检索输入：
 
 **Sparse Route 专用处理**
-1. 关键词识别 (Keyword Extraction):由 ② build_query Step 1 调 LLM 做医学 NER(`build_query_step1_ner`,详见 §9.3),从 `chief_complaint + present_illness` 直接提取实体;**NER 直接产 raw text 进 `confirmed_symptoms` / `denied_symptoms`,不再做 EL 归一化**(EL 整层下线,见 §4.1.6.2);**NER 也不驱动 sparse 词袋**(2026-05-17 RETRIEVAL_EVAL §2 评测决定:中文症状词 EL 50% Tier 3 占位,alias 反查同义词收益低,sparse 改 state 多字段直采)。
-2. Sparse 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造):`sparse_queries` 由 state 多字段直采,每条作一次独立 BM25 查询(strip 后长度 ≥ 2 过滤、保序去重):
+> 历史:`build_query` 曾有 Step 1 LLM NER 抽取实体;2026-05-17 sparse 词袋改用 state 多字段直采后 NER 不再驱动 sparse;2026-05-24 评估 NER 整段完全冗余(详见 §4.1.2 ②),已删除。`confirmed/denied/uncertain` 改由 ①/⓪a+intake_followup_ask/⑦ 三个采集节点维护。
+1. Sparse 多字段直采(2026-05-17 RETRIEVAL_EVAL §2 改造):`sparse_queries` 由 state 多字段直采,每条作一次独立 BM25 查询(strip 后长度 ≥ 2 过滤、保序去重):
    - **来源 A(state 结构化字段直采)**:
      - `chief_complaint`(顶层主诉)
      - `present_illness_slots` 单值字段:`location` / `duration_pattern` / `onset_mode`(每条独立成袋)

@@ -130,7 +130,8 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── __init__.py
 │   │   │   ├── info_collect.py         # 节点 ①：主诉提取 + 病史/报告加载（单轮无交互）
 │   │   │   ├── analyze_initial_reports.py  # 节点 ①.5：初始报告解析（多模态 LLM 直读，提取结构化发现）
-│   │   │   ├── build_query.py          # 节点 ②:NER + Sparse 多字段直采 + Query 构建/改写│   │   │   ├── retrieve.py             # 节点 ③：全量向量召回
+│   │   │   ├── build_query.py          # 节点 ②:Sparse 多字段直采 + LLM Dense Query 改写(2026-05-24 NER 整段删除)
+│   │   │   ├── retrieve.py             # 节点 ③：全量向量召回
 │   │   │   ├── select_symptom.py       # 节点 ④:智能追问选择(1 LLM,slot 维度填补 + open 兜底)
 │   │   │   ├── generate_followup.py    # 节点 ⑤：生成追问问题
 │   │   │   ├── wait_followup_answer.py # 节点 ⑥：interrupt 等待用户回答
@@ -146,7 +147,6 @@ Agentic-RAG-Medical-care-Assistant/
 │   │   │   ├── __init__.py
 │   │   │   ├── info_collect.py         # InfoCollectOutput
 │   │   │   ├── report_parser.py        # ReportFinding, ReportFindings
-│   │   │   ├── ner.py                  # NEREntity, NERResult
 │   │   │   ├── query_construction.py   # QueryConstructionOutput
 │   │   │   ├── symptom_selection.py    # FollowupQuestion, SmartFollowupOutput
 │   │   │   ├── followup.py             # FollowupParseResult

@@ -85,7 +85,7 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
 
     # === 追问控制 ===
     followup_round: int                  # 当前追问轮次(硬性上限 MAX_FOLLOWUP_ROUNDS=8;正常由 HPI 12 维 slot 填空自然收敛,上限仅作兜底);Node ⑩ Step -1 在入口直接判断 `followup_round >= MAX_FOLLOWUP_ROUNDS` 以短路出 insufficient,不再引入冗余的 capped 旗标字段
-    last_nlu_round: int                  # build_query 已完成 NER 的最近轮次(初始 0);仅当 followup_round > last_nlu_round 时对 followup_answer 做 NER,防止检查路径(N9→N2)重复抽取旧回答
+    # last_nlu_round 字段已删除(2026-05-24):② NER 整段移除后,该 NER 游标失去用途
     followup_question: str               # 当前追问问题
     followup_answer: str                 # 用户对追问的回答
     followup_questions: list[dict]        # 本轮待追问列表(最多 MAX_FOLLOWUP_QUESTIONS=5 项),支持两种 type:
@@ -145,11 +145,10 @@ class MedicalState(TypedDict):  # 实际为 pydantic.BaseModel,见 src/agent/sta
 | **系统默认值** | `dense_query` | `str` | `""` | 首轮 `build_query` ② 生成 |
 | | `sparse_queries` | `list[str]` | `[]` | 首轮 `build_query` ② 生成 |
 | | `candidate_chunks` | `list[dict]` | `[]` | `retrieve` ③ 每轮覆盖写入 |
-| | `confirmed_symptoms` | `list[str]` | `[]` | 首轮 `build_query` ② 从主诉 NER 初始化(raw text) |
-| | `denied_symptoms` | `list[str]` | `[]` | 首轮 `build_query` ② 从主诉 NER 否定项初始化(raw text) |
+| | `confirmed_symptoms` | `list[str]` | `[]` | ① info_collect 从主诉 holistic 抽取;⓪a/intake_followup_ask + ⑦ 后续追问追加 |
+| | `denied_symptoms` | `list[str]` | `[]` | ① info_collect 从主诉 holistic 抽取(否认项);⓪a/intake_followup_ask + ⑦ 后续追问追加 |
 | | `uncertain_symptoms` | `list[str]` | `[]` | `process_followup_answer` ⑦ 填充 |
 | | `followup_round` | `int` | `0` | `process_followup_answer` ⑦ 每轮 +1；Node ⑩ 入口直接读取判断上限 |
-| | `last_nlu_round` | `int` | `0` | NER 游标；首轮 `build_query` ② 完成后置为 `followup_round` |
 | | `followup_question` | `str` | `""` | `intake_followup_ask` / `generate_followup` ⑤ / `wait_followup_answer` ⑥ 入口模板补 — 凡是要 interrupt 等用户答的节点都写 |
 | | `followup_answer` | `str` | `""` | `wait_followup_answer` ⑥（interrupt 恢复写入） |
 | | `followup_questions` | `list[dict]` | `[]` | `intake_followup_ask`(slot batch)/ `select_discriminative_symptom` ④(鉴别诊断)/ `generate_followup` ⑤(检索前 targeted)三处填,每项 `type ∈ {"slot","open","obstetric","targeted","history","report_upload"}` |
@@ -209,7 +208,6 @@ def create_initial_state(patient_id: str, patient_input: str) -> MedicalState:
         uncertain_symptoms=[],
         # 追问控制(info_gain 随信息增益机制移除一并删除)
         followup_round=0,
-        last_nlu_round=0,
         followup_question="",
         followup_answer="",
         followup_questions=[],
@@ -392,41 +390,28 @@ result = graph.invoke(initial_state, config=config)
   ```
 
 
-##### ② `build_query` — NER + Query 构建/改写
+##### ② `build_query` — Sparse 直采 + Dense Query 改写
 
-> **EL 移除**:原 Step 2 Entity Linking(三层归一化:Tier 1 精确别名 / Tier 2 向量阈值 / Tier 3 占位)整段删除,运行时不再查 `terms_collection`(数据资产保留备用,见 §2.4.6);原"四步"精简为"三步"(NER → Sparse 多字段直采 → Query 构建)。EL 删除后,`confirmed_symptoms` / `denied_symptoms` 字段值改为 raw text(无 preferred_term 归一化),下游 ④ select_symptom 的"已问去重 / 报告证据消费"由 LLM 一次语义比对承担。详细动机见 EL_DESIGN_REVIEW §11。
+> **EL 移除**(2026-05-17):原 Entity Linking 三层归一化整段删除,运行时不再查 `terms_collection`(数据资产保留备用,见 §2.4.6)。
+>
+> **NER 移除**(2026-05-24):原 Step 1 NER 完全冗余 — `chief_complaint` / `present_illness` 是 ① info_collect 刚写出来的,① 同时已 holistic 抽好 confirmed/denied/uncertain;② 二次 NER 信息源相同(且更窄,看的是 ① 浓缩后),不可能补到 ① 没抓到的症状,反而字符串近似匹配("右上腹疼痛" vs "右上腹痛")重复塞污染 confirmed。后续轮 NER 抽出的 entities 代码只在 `if is_first_round` 才分流 — 死代码纯空转 70s/轮。删后原"三步"(NER → Sparse → Query)精简为"两步"(Sparse → Query)。`last_nlu_round` 字段(NER 游标)也随之报废删除。新增症状全部由 ① / ⓪a + intake_followup_ask / ⑦ 三个采集节点产。
 
-- **输入**: `chief_complaint`, `present_illness`, `present_illness_slots`, `medical_history`, `report_findings`, `confirmed_symptoms`, `denied_symptoms`, `followup_answer`(后续轮)
-- **职责**(每轮循环均完整执行以下三步):
+- **输入**: `chief_complaint`, `present_illness`, `present_illness_slots`, `medical_history`, `report_findings`, `confirmed_symptoms`, `denied_symptoms`
+- **职责**(每轮循环均完整执行以下两步):
 
-  **Step 1. NER 实体抽取(LLM)**
-  - 首轮(`followup_round == 0`):对主诉 + 现病史做 LLM NER(检查报告已由 ①.5 结构化为标准术语,无需 NER)
-  - 后续轮:仅当 `followup_round > last_nlu_round` 时,对 `followup_answer` 做 NER,处理完后置 `last_nlu_round = followup_round`;否则跳过(说明当前从检查路径 N9→N2 进入,`followup_answer` 为已处理的旧值)
-  - 提取结构化实体:实体文本、类型(symptom/disease/drug/anatomy)、否定标记、时态(current/past/family)、数值
-  - 检查路径进入时(`followup_round == last_nlu_round`)直接跳到 Step 3,基于已有 `confirmed_symptoms`/`denied_symptoms` 和新 `report_findings` 重建 query
-  - **首轮主诉症状初始化**(`followup_round == 0`,NER 输入仅含 `chief_complaint` + `present_illness`):从 NER 抽到的实体中筛选 `entity_type == 'symptom'` 且 `temporality == 'current'` 的实体,按 `negation` 分流,**直接用实体 raw text 写入**(EL 已删,不再归一化):
-    - `negation == False` → 写入 `confirmed_symptoms`(如"肚子疼"→"肚子疼")
-    - `negation == True` → 写入 `denied_symptoms`(如"没有发烧"→"发烧")
-    - 下游 ④ select_symptom 的"已问去重"由 LLM 一次语义比对承担("肚子疼"/"腹痛"同义判断不再依赖 preferred_term 精确匹配)
-  - 此步确保 Node ④ 选追问目标时不会向患者重复询问其主诉中已明确陈述或否认的症状
-
-  **Step 2. Sparse 多字段直采(Sparse 路专用,2026-05-17 RETRIEVAL_EVAL §2 改造)**
+  **Step 1. Sparse 多字段直采**(无 LLM,确定性,2026-05-17 RETRIEVAL_EVAL §2 改造)
   - **不查 terms_collection,无任何 alias 反查**;纯 state 字段拼接:
     - 来源 A:`chief_complaint` + `present_illness_slots` 单值字段(location/duration_pattern/onset_mode)+ list 字段(associated_symptoms/aggravating/relieving/trigger/nature/severity;2026-05-22:trigger/nature/severity 改 list[str])
     - 来源 B:`report_findings` 的 `positive_findings`(全加)+ `impressions`(阴性过滤:含 `(-)`/正常/阴性/未见/无异常 的整条跳过)
     - 长度 ≥ 2 + 保序去重,实测 62 case 平均 21.8 条
 
-  **Step 3. Query 构建/改写(Dense 与 Sparse 分路构建)**
-  - 首轮:基于 `confirmed_symptoms`(NER raw text)+ 病史 + `report_findings` 中的 **`positive_findings` / `impressions`** 构建初始检索 query
-    - `positive_findings` 含对异常值的临床解读(如"WBC 12.3↑"→"白细胞升高",由 report_parser 提取时同步写入),文献语言,可直接用于召回
-    - `abnormal_values` 原始数值**不进 query**(数字无向量语义,且文献不以数值描述疾病);`negative_findings` 同样不进 query
-    - `abnormal_values` 保留用于 Node ⑩ 诊断推理上下文(LLM 需要精确数值做临床判断,如 WBC 25×10⁹/L vs 12×10⁹/L 指向不同严重程度)
-  - 后续轮:融合所有**已确认症状**(`confirmed_symptoms`)+ 新增实体改写 query,确保新方向被覆盖;`denied_symptoms` **不进 query**(BM25 无法处理否定,embedding 也会被否认词拉偏方向),仅在 Node ⑩ `diagnose` 作为排除证据使用
-  - **Dense Route**:LLM 将所有确认症状、病史关键项、`report_findings` 的 `positive_findings`/`impressions`、以及 `present_illness_slots` 中已填充的维度信息(如诱因、加重/缓解因素、症状性质等)整合,改写为语义连贯的自然语言查询句(如"进食后加重的上腹胀痛伴反酸,白细胞升高,既往糖尿病史"),生成 `dense_query`;维度信息的纳入使 query 从泛化症状描述细化为具有鉴别特征的临床描述,显著提升召回精度
-  - **Sparse Route**:`sparse_queries` 由 Step 2 产出(state 多字段直采,详见 §3.2.1 Step 2)。每条作一次独立 BM25 查询,N 条 = N 次查询。融合层走加权多路 RRF(详见 §3.2.2:`dense_weight = max(1, N_sparse/RRF_DENSE_WEIGHT_FACTOR)`,sparse 各路等权 1 票)。`abnormal_values` 原始数值与 `negative_findings` 仍不进 query(数字无向量语义;否定词与 BM25/embedding 语义冲突)。
+  **Step 2. Dense Query 构建/改写**(LLM 调用一次)
+  - **Dense Route**:LLM 将所有 `confirmed_symptoms`(来自 ①/⓪a/⑦ 采集节点)、病史关键项、`report_findings.positive_findings/impressions`、`present_illness_slots` 已填充维度整合,改写为语义连贯的自然语言查询句(如"进食后加重的上腹胀痛伴反酸,白细胞升高,既往糖尿病史"),生成 `dense_query`
+  - **Sparse Route**:`sparse_queries` 由 Step 1 产出(state 多字段直采,详见 §3.2.1)。每条作一次独立 BM25,融合层走加权多路 RRF(详见 §3.2.2:`dense_weight = max(1, N_sparse/RRF_DENSE_WEIGHT_FACTOR)`,sparse 各路等权 1 票)
+  - `abnormal_values` 原始数值**不进 query**(数字无向量语义;数值上下文保留给 ⑩ diagnose 推理);`denied_symptoms` / `negative_findings` 也不进 query(BM25/embedding 无法处理否定,仅在 ⑩ diagnose 作排除证据使用)
 
-- **输出**: `dense_query`、`sparse_queries`、`last_nlu_round`(后续轮 NER 执行后更新);首轮额外初始化 `confirmed_symptoms`(主诉中当前、未否定的症状 raw text)和 `denied_symptoms`(主诉中当前、被否定的症状 raw text)
-- **设计理由**: 将 NER 置于 `build_query` 而非独立前置节点,因为每轮循环(追问回答、检查结果回传)都带来新信息,需在 query 构建前统一抽实体;EL 归一化层整体移除(LLM 内化的医学同义词知识远超 4 万条 ICD-10 alias 表,运行时 LLM 在线判断比向量阈值精确得多,详见 EL_DESIGN_REVIEW §11)
+- **输出**: `dense_query`、`sparse_queries`;`confirmed_symptoms` / `denied_symptoms` / `uncertain_symptoms` 透传 state(本节点不再修改)
+- **设计理由**: Sparse 直采无 LLM,Dense 改写仅 1 次 LLM;`confirmed/denied/uncertain` 由前置采集节点(① + ⓪a/intake_followup_ask + ⑦)统一维护,② 不再二次抽取避免冗余 + near-duplicate 噪音
 
 ##### ③ `retrieve` — 混合检索（Dense + Sparse）
 - **输入**: `dense_query`, `sparse_queries`
@@ -513,7 +498,7 @@ result = graph.invoke(initial_state, config=config)
   - LLM 解析用户回答,根据追问项的 type 分别处理:
   - **slot 类追问**(`type: "slot"`):将答案回填到 `present_illness_slots` 对应槽位,同时将新信息追加到 `present_illness` 自由文本(确保 `build_query` ② 下轮构建 query 时能利用更丰富的维度信息提升检索精度)
     - 例:追问 `{"slot": "aggravating", "type": "slot"}`,用户回答"吃完饭后会疼得更厉害" → `present_illness_slots["aggravating"] = ["进食后"]`,同时 `present_illness` 追加"进食后加重"
-  - **open 类追问**(`type: "open"`):患者回答的新症状(如"对了我还有点反酸"、"昨天开始有点头晕")直接进 `new_symptoms` 字段,由本节点 append 到 `confirmed_symptoms`,供下轮 build_query NER + 召回链路使用
+  - **open 类追问**(`type: "open"`):患者回答的新症状(如"对了我还有点反酸"、"昨天开始有点头晕")直接进 `new_symptoms` 字段,由本节点 append 到 `confirmed_symptoms`,供下轮 build_query 召回链路使用
   - 解析回答中所有患者主动提到的新症状(无论是 open 类问的回答,还是 slot 类问时顺带补充),都进 `new_symptoms`
 - **输出**: 更新 `confirmed_symptoms`, `denied_symptoms`, `uncertain_symptoms`, `present_illness_slots`, `present_illness`, `followup_round += 1`
 
@@ -712,7 +697,7 @@ graph TD;
     N1("① info_collect<br/><i>一次 LLM 同时:<br/>• 拆主诉 + 现病史 + 12 维细节<br/>• 解析 ⓪a 答的过敏/慢病/孕期 + 提取新症状, 合并写回 state</i>")
     N1b("①.5 analyze_initial_reports<br/><i>interrupt 问有无报告 → 加载/多模态解析 → report_findings</i>")
     N1c("intake_followup_ask<br/><i>• 分批问 12 维slot(每批 4 个 + 1 个'还有别的不适吗')<br/>• 全部收完一次 LLM 综合翻译,归位回答至结构化字段 </i>")
-    N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
+    N2("② build_query<br/><i>Sparse 多字段直采 + LLM Dense Query 改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
     N4("④ select_discriminative_symptom<br/><i>根据召回结果出鉴别诊断追问 + 同时写 unaskable 粗筛(供 ⑩ 精筛)</i>")
     subgraph FollowupLoop[" "]
@@ -1053,7 +1038,7 @@ Agent 工作流中不同节点对上下文的需求不同。每个节点在调�
 | 节点（对应 4.1 节） | 读取的 State 字段 | 是否调用 LLM | 示例（prompt 中实际拼入的内容） |
 |------|----------------|-------------|------|
 | `info_collect` ① | `patient_id`、`patient_input` | 是（Step 1 LLM 提取主诉+现病史+结构化槽位）；Step 2-3 纯 DB 查询 | Step 1: LLM 从 `patient_input` 提取 `chief_complaint` + `present_illness` + `present_illness_slots`（12 维度同步填充）；Step 2: 以 `patient_id` 查 PostgreSQL 加载 `medical_history`；Step 3: 加载 `exam_reports` |
-| `build_query` ② | `chief_complaint`、`present_illness`(首轮)/ `followup_answer`(追问轮)/ 新检查结果文本、`confirmed_symptoms`、`denied_symptoms`、`medical_history`、`report_findings`(`positive_findings` / `impressions` 进 query 的 dense 路与 sparse 路;`abnormal_values` 原始数值、`negative_findings`、`denied_symptoms` 均不进 query)、`present_illness_slots`(已填充的维度信息纳入 Dense query 与 Sparse 多字段直采) | 是 | 首轮对主诉+现病史做 NER 直出 raw text 进 `confirmed_symptoms` / `denied_symptoms`(EL 已移除,无归一化);`confirmed_symptoms` + `present_illness_slots` 已填维度构建 `dense_query`;`sparse_queries` 由 state 多字段直采(chief_complaint + 12 维 slots + `positive_findings`/`impressions` 每条独立词袋,阴性 impression 过滤)合并而成;`denied_symptoms` 仅用于 NER 去重上下文,不参与 query 构建 |
+| `build_query` ② | `chief_complaint`、`present_illness`、`present_illness_slots`(已填维度)、`confirmed_symptoms`(透传)、`denied_symptoms`(透传,**不进 query**)、`medical_history`、`report_findings`(`positive_findings`/`impressions` 进 dense + sparse;`abnormal_values`/`negative_findings` 不进 query) | 是 | 2026-05-24 NER 删除后只剩 2 步:`confirmed_symptoms` + `present_illness_slots` 已填维度构建 `dense_query`(LLM 1 次);`sparse_queries` 由 state 多字段直采(chief_complaint + 12 维 slots + `positive_findings`/`impressions` 每条独立词袋,阴性 impression 过滤)合并;`confirmed/denied/uncertain` 透传 state 不修改 |
 | `retrieve` ③ | `dense_query`、`sparse_queries` | 否（纯检索） | `dense_query: "外伤后中间清醒期意识恶化伴瞳孔不等大及锥体束征"` + `sparse_queries: ["恶心", "呕吐", "右侧瞳孔散大", "左侧Babinski征阳性", "右额颞线形骨折"]` → Dense ANN + N×BM25 → RRF 融合 |
 | ~~`extract_symptoms` ④~~ | — | — | **节点已删除**(TF-IDF 抽症状对患者追问无价值,见 §4.1.2 ④);④ 直接从 state 出追问 |
 | `select_discriminative_symptom` ④ | `chief_complaint`、`present_illness`、`present_illness_slots`、`confirmed_symptoms`、`denied_symptoms`、`uncertain_symptoms` | 是(1 LLM:SmartFollowupOutput) | LLM 一次输入 state → 同时出 questions(≤5 条追问,`type` ∈ `{"slot","open"}`) + unaskable_symptoms(≤5 条想知道但患者答不上的体征粗筛,`{description, reason}`);后续 ⑩ Step 3 输出 retained_unaskable 覆盖粗筛 → 精筛供 ⑧a 消费 |
@@ -1156,7 +1141,7 @@ RAG Pipeline（Dense/Sparse 双路检索 → RRF 融合）产出候选 chunk，�
 
 1. **读取结构化字段**：从 State 直接读取，零开销（已由节点级实时提取维护）
 2. **LLM 分块摘要**：旧消息区按约 4000 tokens 分组，生成结构化摘要，重点保留对话语境和推理过程
-3. **摘要校验**:基于 NER 抽取的实体集合(EL 移除后 raw text)与摘要做集合对比,遗漏实体自动补回
+3. **摘要校验**:基于 `confirmed_symptoms`(来自 ①/⓪a/⑦ 采集节点的 raw text)与摘要做集合对比,遗漏实体自动补回
 
 **压缩后上下文结构**：
 
@@ -1209,8 +1194,8 @@ graph = StateGraph(MedicalState)
 | `dense_query` | `str` | `build_query` ② | Dense 路检索 query:LLM 将确认症状+病史改写成的语义连贯自然语言句子 |
 | `sparse_queries` | `list[str]` | `build_query` ② | Sparse 路检索 queries:state 多字段直采(`chief_complaint` + `present_illness_slots` 6 单值字段 + 3 list 字段 + `report_findings.positive_findings`/`impressions` 每条独立词袋,阴性 impression 过滤;去重 + 长度 ≥ 2 过滤);每条一次 BM25,RRF 加权融合(`dense_weight = max(1, N_sparse/RRF_DENSE_WEIGHT_FACTOR)`;见 §3.2.1 Step 2 / §3.2.2) |
 | `candidate_chunks` | `list[dict]` | `retrieve` ③ | 候选 chunk 池(每轮覆盖写入,保留 RRF 融合分数) |
-| `confirmed_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ④(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认有的症状,EL 移除后为 raw text(来源:主诉 NER、报告阳性发现、追问确认) |
-| `denied_symptoms` | `list[str]` | `build_query` ②(首轮主诉初始化)、`select_discriminative_symptom` ④(报告证据优先消费 LLM 批量)、`process_followup_answer` ⑦ | 已确认没有的症状,EL 移除后为 raw text(来源:主诉 NER 否定项、报告阴性发现、追问否认) |
+| `confirmed_symptoms` | `list[str]` | `info_collect` ①(主诉 holistic 抽)、`initial_ask` ⓪a / `intake_followup_ask`(form 答案 append)、`process_followup_answer` ⑦ | 已确认有的症状,raw text(2026-05-24 ② NER 删除后,② 仅透传不再写) |
+| `denied_symptoms` | `list[str]` | `info_collect` ①、`initial_ask` ⓪a / `intake_followup_ask`、`process_followup_answer` ⑦ | 已确认没有的症状,raw text(来源:主诉否认项、追问否认;同上,② 仅透传) |
 | `uncertain_symptoms` | `list[str]` | `process_followup_answer` ⑦ | 用户明确表示不知道/不确定的症状,raw text;已问过不再重问 |
 | `followup_questions` | `list[dict]` | `select_discriminative_symptom` ④ | 本轮待追问列表（最多 MAX_FOLLOWUP_QUESTIONS=5 项），支持两种类型：症状级 `{"term": str, "type": "symptom"}` + 维度级 `{"slot": str, "type": "dimension"}`；维度通过配额制占 1~2 席（空槽填满后退化为纯症状）；为空则路由到诊断 |
 | `unaskable_symptoms` | `list[dict]` | ④ 写粗筛版 → ⑩ 1 步 LLM 输出 `retained_unaskable` 覆盖为精筛版 | LLM 想知道但患者答不上的体征/指标(`{"description": str, "reason": str}`)。④ 出粗筛喂 ⑩ 判 need_exam;⑩ 基于诊断结果挑出"仍需检查确认的"精筛覆盖此字段;⑧a `recommend_exam` 直接消费精筛版 |
@@ -1219,7 +1204,6 @@ graph = StateGraph(MedicalState)
 | `followup_answer` | `str` | `wait_followup_answer` ⑥（interrupt 恢复写入） | 用户对追问的回答 |
 | `exam_round` | `int` | `recommend_exam` ⑧a | 已建议检查的轮次，每轮 +1；≥ MAX_EXAM_ROUNDS 时强制进入诊断 |
 | `pending_exam_results` | `list` | `wait_exam_report` ⑧b | interrupt 返回的用户回传检查结果；`process_exam_result` ⑨ 消费后解析入 `exam_reports` / `report_findings` |
-| `last_nlu_round` | `int` | `build_query` ② | NER 游标，初始 0；每次 NER 完成后置为 `followup_round`；检查路径（N9→N2）进入时两值相等，跳过重复 NER |
 | `diagnosis_result` | `list[dict]` | `diagnose` ⑩ | 诊断结果（disease / probability / evidence / differentiation / differentiation_type / `failure_reason`）；由 `with_structured_output` + Pydantic `min_length=1` 保证非空；`failure_reason` 承载系统级失败原因（触顶 or LLM 失败），`None` 表示 LLM 正常推理结果，供 ⑫⑬ 差异化提示与审计消费 |
 | `safety_constraints` | `dict` | `safety_gate` ⑪ | 安全门控输出（banned_drugs/interaction_warnings/contraindication_flags） |
 | `recommended_tests` | `list[str]` | `recommend_exam` ⑧a（检查循环中间结果）、`generate_advice` ⑫（最终建议输出） | 建议检查项目 |

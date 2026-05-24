@@ -73,16 +73,16 @@ retry_observer = RetryObserver()
 ```
 
 ```python
-# ── 中安全等级 — 各业务节点典型调用（以 ② build_query Step 1 NER 为例）──
+# ── 中安全等级 — 各业务节点典型调用（以 ② build_query Step 2 Query 构建为例）──
 from src.common.metrics import _attempts, _failures, _latency, retry_observer
 
-node, schema_name = "build_query_step1_ner", "NERResult"
+node, schema_name = "build_query_step2_query", "QueryConstructionOutput"
 _attempts.labels(node=node, schema=schema_name).inc()
 t0 = time.perf_counter()
 try:
-    chain = llm.with_structured_output(NERResult).with_retry(stop_after_attempt=3)
-    ner_result = chain.invoke(
-        ner_prompt,
+    chain = llm.with_structured_output(QueryConstructionOutput).with_retry(stop_after_attempt=3)
+    qc_result = chain.invoke(
+        query_prompt,
         config={"callbacks": [retry_observer], "metadata": {"node": node, "schema": schema_name}},
     )
 except Exception as e:
@@ -222,8 +222,7 @@ Schema 字段一旦上线即进入两个长生命周期消费路径，**不允�
 |-------|--------|---------|---------|---------|
 | ① `info_collect` Step 1 | `InfoCollectOutput` | `chief_complaint: str`, `present_illness: str`, `present_illness_slots: dict`（12 个维度槽位，未提及维度为 None/空列表） | 中 | 最多尝试 3 次；仍失败则抛异常终止会话（无主诉无法继续） |
 | ①.5 `analyze_initial_reports` / ⑨ `process_exam_result` | `ReportFindings` | `findings: list[ReportFinding]`；每项含 `report_type: str`, `abnormal_values: list[str]`, `impressions: list[str]`, `positive_findings: list[str]`, `negative_findings: list[str]` | 中 | 最多尝试 3 次；仍失败则该份报告标记解析失败，`report_findings` 不追加该项，流水线继续（降级为无该报告证据） |
-| ② `build_query` Step 1 NER | `NERResult` | `entities: list[NEREntity]`;每项含 `text: str`, `entity_type: Literal["symptom","disease","drug","anatomy"]`, `negation: bool`, `temporality: Literal["current","past","family"]`, `value: str｜None` | 中 | 最多尝试 3 次;仍失败则抛异常 |
-| ② `build_query` Step 3 Query 构建 | `QueryConstructionOutput` | `dense_query: str`(单字段;sparse_queries 由 Step 2 确定性产出,不进 LLM 输出) | 中 | 最多尝试 3 次;仍失败则抛异常 |
+| ② `build_query` Step 2 Query 构建 | `QueryConstructionOutput` | `dense_query: str`(单字段;sparse_queries 由 Step 1 确定性产出,不进 LLM 输出) | 中 | 最多尝试 3 次;仍失败则抛异常 |
 | ④ `select_symptom` 智能追问选择 | `SmartFollowupOutput` | `questions: list[FollowupQuestion]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `type: Literal["slot","open"]` + `slot: str\|None`;`unaskable_symptoms: list[UnaskableSymptom]`(≤ MAX_FOLLOWUP_QUESTIONS);每项 `description: str` + `reason: str`(粗筛版,⑩ Step 3 会精筛覆盖) | 中 | 最多尝试 3 次;仍失败则返回空 questions + 空 unaskable → `should_continue` 路由跳诊断 |
 | ⑦ `process_followup_answer` | `FollowupParseResult` | `symptom_responses: list[dict]`（每项含 `term: str`, `status: Literal["confirmed","denied","uncertain","unanswered"]`）, `slot_fills: dict[str, str \| list[str]]`（维度级回填，单值槽 str / 多值槽 list[str]，与 `PresentIllnessSlots` 类型对齐）, `new_symptoms: list[str]` | 中 | 最多尝试 3 次；仍失败则抛异常（追问回答未解析将导致信息丢失） |
 | ⑩ `diagnose` 1 步 LLM（**原生多模态模型** — `settings.llm.VISION_BASE_URL` / `VISION_API_KEY` / `VISION_MODEL_NAME`，DashScope qwen3.5-plus） | `DiagnosisOutput` | `results: list[RankedDisease]`（每项 disease / probability / evidence / differentiation / differentiation_type / failure_reason）+ `retained_unaskable: list[UnaskableSymptom]`（精筛覆盖 ④ 粗筛 → 写回 `state.unaskable_symptoms` 供 ⑧a 消费）；context 含 figure 时 `image_path` 转 base64 作为多模态消息送入（详见 §3.2.3 LLM 路由段）；完整定义见 §9.5 | 高 | 最多尝试 3 次；失败兜底产出 insufficient 结果并在 `failure_reason` 字段记录 `"step_1_structured_output_failed: <ExcType>: <msg>"`（详见 4.1.2 ⑩ 结构化输出保障） |
@@ -326,23 +325,9 @@ class ReportFindings(BaseModel):
 
 ---
 
-##### 3. `ner.py` — 命名实体识别输出
+##### 3. `ner.py` — 已删除
 
-```python
-# —— 子模型：被 NERResult.entities 引用 ——
-class NEREntity(BaseModel):
-    """单个医学命名实体"""
-    text:        str = Field(..., description="实体原文")
-    entity_type: Literal["symptom", "disease", "drug", "anatomy"] = Field(..., description="实体类型")
-    negation:    bool = Field(False, description="是否为否定表述，如'不头痛'")
-    temporality: Literal["current", "past", "family"] = Field("current", description="时间属性：当前/既往/家族")
-    value:       str | None = Field(None, description="量化值（如体温 38.5°C），无则 None")
-
-# —— 主模型：传给 llm.with_structured_output() ——
-class NERResult(BaseModel):
-    """② build_query Step 1 NER LLM 输出"""
-    entities: list[NEREntity] = Field(default_factory=list, description="识别到的医学实体列表")
-```
+2026-05-24:② NER 整段移除(详见 §4.1.2 ②),`src/agent/schemas/ner.py` 删,运行时不再有 `NEREntity` / `NERResult`。
 
 ---
 
@@ -357,9 +342,9 @@ EL 整层移除,`src/agent/schemas/entity_linking.py` 删,运行时不再有 `En
 ```python
 # —— 主模型:传给 llm.with_structured_output(),无子模型 ——
 class QueryConstructionOutput(BaseModel):
-    """② build_query Step 3 Query 构建 LLM 输出 — 仅 dense_query 一字段。
+    """② build_query Step 2 Query 构建 LLM 输出 — 仅 dense_query 一字段。
 
-    sparse_queries 由 Step 2(state 多字段直采)确定性产出,LLM 不参与;
+    sparse_queries 由 Step 1(state 多字段直采)确定性产出,LLM 不参与;
     曾把 sparse_queries 也作为 LLM 输出字段(为 schema 完整),但 LLM 看到 prompt
     里的"sparse 已定不要改"会合理省略输出,触发 schema 校验失败。改为 LLM 只承担
     dense_query 改写一职,避免 prompt/schema 内在冲突。
