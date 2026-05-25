@@ -47,7 +47,7 @@
       3.2.3 精确过滤与重排
 
 4. Agent 设计
-   4.1 工作流（LangGraph StateGraph，15 节点 + 2 条件路由）
+   4.1 工作流（LangGraph StateGraph，17 节点 + 4 条件路由）
    4.2 上下文管理（Select + Compress 两层架构）
 
 5. 基础设施
@@ -83,7 +83,7 @@
 ## 1.3 总体架构
 ### 1.3.1 项目文件目录结构
 ```
-Agentic-RAG-Medical-care-Assistant/
+Agentic-RAG-diagnose-Assistant/
 │
 ├── docker-compose.yml                  # 容器编排（共 13 个）：nginx, api, Milvus（standalone+etcd+minio）, PostgreSQL, Redis, Prometheus, Grafana, Loki, Promtail, Node Exporter, DCGM Exporter（LLM 推理通过云端 API 调用）
 ├── .dockerignore                       # docker build 上下文排除（.venv / tests / data / infra/{grafana,prometheus,...}），J0 新增
@@ -298,7 +298,7 @@ Agentic-RAG-Medical-care-Assistant/
 | 3.2.1 查询预处理 | `src/rag/retrieval/query_processing.py` |
 | 3.2.2 召回（Dense + Sparse + RRF） | `src/rag/retrieval/` |
 | 3.2.3 Cross-Encoder 精排（diagnose ⑩ 前置） | `src/rag/retrieval/reranker.py` |
-| 4.1 Agent 工作流（15 节点 + 2 路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ①.5，⑧ 拆 a/b — 原 ⑥a/⑥b 已平铺为 ⑤/⑥）+ `routers/`（should_continue / diagnose_router） |
+| 4.1 Agent 工作流（17 节点 + 4 条件路由） | `src/agent/graph.py` + `nodes/`（①~⑬ 含 ⓪a / ①.5 / intake_followup_ask，⑥⑧ 各拆 a/b/c）+ `routers/`（should_continue / diagnose_router / generate_followup_out / post_followup） |
 | 4.2 上下文管理 | `src/rag/context/` |
 | 5.1 Redis 缓存 | `src/db/redis/cache.py` |
 | 5.2 监控层 | `infra/prometheus/` + `infra/grafana/` + `infra/loki/` |

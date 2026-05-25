@@ -79,25 +79,38 @@ nginx ──► api (FastAPI + Agent + RAG + GPU models) ──► DashScope (LL
 
 ### Agent workflow (`src/agent/`)
 
-A LangGraph `StateGraph` with **16 nodes + 2 conditional routers**. The shared `MedicalState` (TypedDict) is defined in `src/agent/state.py`. Two interrupt-driven loops sit inside the main flow:
+A LangGraph `StateGraph` with **17 nodes + 4 conditional routers** (`src/agent/graph.py` is ground truth — don't memorize counts, grep `add_node` / `add_conditional_edges` after any topology change). Shared `MedicalState` (Pydantic BaseModel) in `src/agent/state.py`. Two interrupt-driven loops (followup + exam) plus an entry interrupt at ⓪a.
 
 ```
-① info_collect → ①.5 analyze_initial_reports → ② build_query → ③ retrieve →
-④ extract_symptoms → ⑤ select_discriminative_symptom →
-  [router: should_continue]
-    ├─ followup loop:    ⑥a generate_followup → ⑥b wait_followup_answer (interrupt) → ⑦ process_followup → ②
-    └─ ⑩ diagnose →
-       [router: diagnose_router]
-         ├─ exam loop:   ⑧a recommend_exam → ⑧b wait_exam_report (interrupt) → ⑨ process_exam_result → ②
-         └─ ⑪ safety_gate → ⑫ generate_advice → ⑬ format_response → END
+START → ⓪a initial_ask (entry interrupt: open / 病史 / 孕期 / 用药 / 报告 form)
+       → ① info_collect → ①.5 analyze_initial_reports → intake_followup_ask → ⑥ generate_followup
+
+  [router: generate_followup_out_router]    (3-way, out of ⑥)
+    ├─ to_wait            → ⑥b wait_followup_answer (interrupt) → ⑦ process_followup_answer
+    ├─ to_recommend_exam  → ⑧a recommend_exam   (no askable but unaskable → 首诊直接推单)
+    └─ to_build_query     → ② build_query       (both empty → straight to retrieval)
+
+  ⑦ → [router: post_followup_router]        (2-way, intake vs differential paths)
+        ├─ loop_to_followup  → ⑥             (intake path: candidate_chunks still empty)
+        └─ to_build_query    → ②             (differential path: chunks non-empty → re-retrieve)
+
+② → ③ retrieve → ⑤ select_discriminative_symptom
+  [router: should_continue]                  (2-way, pure function — never mutates state)
+    ├─ followup → ⑥b wait_followup_answer (interrupt) → ⑦ (loops back via post_followup_router)
+    └─ diagnose → ⑩ diagnose
+
+⑩ → [router: diagnose_router]                (2-way, pure function)
+       ├─ recommend_exam → ⑧a recommend_exam → ⑧b wait_exam_report (interrupt)
+       │                  → ⑨ process_exam_result → ② (exam loop)
+       └─ safety_gate    → ⑪ → ⑫ generate_advice → ⑬ format_response → END
 ```
 
 Notes on this graph that are easy to get wrong:
-- ⑥/⑧ are intentionally split into `a` (LLM generates question) and `b` (`interrupt()` waits for user) — keeping them separate prevents the LLM call from re-firing on resume.
-- ⑩ `diagnose` is a **three-step LLM chain** (`EvidenceSheet` → `DiagnosisRanking` → `DiagnosisOutput`). If any step fails after 3 retries, the whole chain short-circuits to an `insufficient` result and writes `failure_reason="step_{N}_structured_output_failed: ..."`. **Never** feed a partial/empty intermediate to the next step.
+- ⑥/⑧ each split "LLM generate" / "interrupt wait" / "LLM parse" into 3 separate nodes (`generate_followup` / `wait_followup_answer` / `process_followup_answer`; `recommend_exam` / `wait_exam_report` / `process_exam_result`) — `interrupt()` lives in its own node so resume doesn't re-fire the LLM call.
+- ⑩ `diagnose` is a **single-step LLM call** (Schema: `DiagnosisOutput`, 1 LLM 出 ranking + retained_unaskable). Earlier 3-step chain (`EvidenceSheet → DiagnosisRanking → DiagnosisOutput`) was retired — RAG eval proved 1-step + full info already achieves top-1 93.5% / top-2 100% at half the latency. If the call fails after 3 retries, writes `failure_reason="structured_output_failed: ..."` and short-circuits to insufficient.
 - ⑩ also has a **Step -1** that short-circuits before any LLM call when `state["followup_round"] >= settings.agent_limits.MAX_FOLLOWUP_ROUNDS` (writes `failure_reason="followup_round_capped"`).
 - `should_continue` router is a **pure function** — it must not mutate state. Cap-handling lives in ⑩ Step -1, not the router.
-- `present_illness_slots` has exactly **13 dimension slots**; multi-value slots (`aggravating`, `relieving`, `associated_symptoms`) are `list[str]`, all others are `str | None`.
+- `present_illness_slots` has exactly **12 dimension slots**; multi-value slots (`trigger`, `nature`, `severity`, `aggravating`, `relieving`, `associated_symptoms`) are `list[str]`, all others are `str | None`.
 
 ### RAG pipeline (`src/rag/`)
 

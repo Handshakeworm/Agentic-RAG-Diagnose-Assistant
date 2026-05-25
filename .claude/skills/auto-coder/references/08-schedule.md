@@ -19,7 +19,7 @@
 | **C** | Ingestion Pipeline（MinerU → Chunk → Embedding → 存储） | 离线摄取链路跑通，样例文档写入 Milvus + PostgreSQL（含 raw_documents 表存 MinerU 产物），支持幂等与增量 |
 | **D** | 术语库(EL 已下线,数据备用) | 构建 terms_collection,导入 ICD-10-CN 标准术语数据(原服务 Retrieval 术语扩展和 Agent 症状预处理;**EL 整层下线后运行时不再被查询**,数据保留作为未来重新启用 EL 或切换到 EL_DESIGN_REVIEW §11.6 方案 A/B 时的基础) |
 | **E** | Retrieval（Dense + Sparse + RRF + Rerank） | 在线查询链路跑通，得到 Top-K chunks（含引用信息），具备稳定回退策略 |
-| **F** | Agent 工作流（LangGraph StateGraph） | 按 4.1 节设计落地 15 节点 + 2 条件路由，实现基于信息增益收敛的迭代式诊断工作流 |
+| **F** | Agent 工作流（LangGraph StateGraph） | 按 4.1 节设计落地 17 节点 + 4 条件路由，实现基于信息增益收敛的迭代式诊断工作流 |
 | **G** | API 层与权限系统 | FastAPI 入口服务、JWT 认证、角色权限、限流，暴露问诊接口 |
 | **H** | 基础设施增强（监控、缓存、日志） | Prometheus + Grafana 指标监控，Loki 日志采集，Redis 缓存客户端与缓存层 |
 | **I** | 评估体系 | 离线评估（RAG + Agent）、在线追踪、LLM Judge |
@@ -107,7 +107,7 @@
 
 ### 阶段 F：Agent 工作流（LangGraph StateGraph）
 
-**目的**：按 4.1 节设计，使用 LangGraph StateGraph 实现完整诊断工作流（15 节点 + 2 条件路由）。先落地最小可用路径（① → ①.5 → ② → ③ → ④ → ⑩ → ⑪ → ⑫ → ⑬），再接入追问循环（⑤→⑥→⑦）和检查循环（⑧a→⑧b→⑨）。
+**目的**：按 4.1 节设计，使用 LangGraph StateGraph 实现完整诊断工作流（17 节点 + 4 条件路由）。先落地最小可用路径（① → ①.5 → ② → ③ → ④ → ⑩ → ⑪ → ⑫ → ⑬），再接入追问循环（⑤→⑥→⑦）和检查循环（⑧a→⑧b→⑨）。
 
 | 编号 | 任务 | 产出文件 | 验收标准 |
 |------|------|---------|---------|
@@ -125,7 +125,7 @@
 | F11 | 条件路由：diagnose_router | `src/agent/routers/diagnose_router.py` | `need_exam` 且 `exam_round < settings.agent_limits.MAX_EXAM_ROUNDS` → recommend_exam；`confirmed` / `insufficient` / `exam_round >= settings.agent_limits.MAX_EXAM_ROUNDS` → safety_gate（常量来源 §9.7，禁止 hardcode）；单元测试 |
 | F12 | 节点 ⑪：safety_gate | `src/agent/nodes/safety_gate.py`、`src/agent/schemas/safety_gate.py`（`SafetyGateOutput`，定义与 §9.5 一致） | 规则过滤：从 medical_history 提取过敏药物/当前用药/妊娠状态 → 匹配药物-过敏对（含同类药排除）+ 配伍禁忌表 + FDA 妊娠分级（D/X 禁用）；LLM 兜底：交叉过敏、罕见药物相互作用、肝肾功能剂量调整；输出 safety_constraints（banned_drugs / interaction_warnings / contraindication_flags）；单元测试 |
 | F13 | 节点 ⑫⑬：建议与输出 | `src/agent/nodes/generate_advice.py`、`format_response.py`、`src/agent/schemas/advice.py`（`AdviceOutput`，定义与 §9.5 一致） | ⑫ 在 safety_constraints 约束内：confirmed → 用药建议 + 注意事项 + 复查建议；insufficient → 线下检查建议；need_exam 达上限 → 诚实告知局限；**读取 `diagnosis_result[0].failure_reason`**：`"followup_round_capped"` → risk_warnings 追加"问诊轮次较多仍未收敛"提示；`"step_N_structured_output_failed..."` → risk_warnings 追加"系统分析出现技术问题，结果不可作为依据"提示（不暴露异常细节）；高危提示优先级最高；⑬ LLM 组织自然语言回复 + 免责声明，failure_reason 非 None 时免责声明补一句"本次诊断因系统原因未能完整推理"；单元测试覆盖 failure_reason 的三种取值（None / followup_round_capped / step_N_... ）对 risk_warnings 和 final_response 的影响 |
-| F14 | StateGraph 编排 | `src/agent/graph.py` | 注册 15 节点 + 2 条件边；顺序边 ①→①.5→②→③→④；条件边 ④→⑤/⑩（两路：追问或诊断）；追问循环 ⑤→⑥→⑦→②；检查循环 ⑧a→⑧b→⑨→②；诊断后路由 ⑩→⑧a/⑪；安全门控 ⑪→⑫；输出链 ⑫→⑬→END；集成测试 |
+| F14 | StateGraph 编排 | `src/agent/graph.py` | 注册 17 节点 + 4 条件边；顺序边 ①→①.5→②→③→④；条件边 ④→⑤/⑩（两路：追问或诊断）；追问循环 ⑤→⑥→⑦→②；检查循环 ⑧a→⑧b→⑨→②；诊断后路由 ⑩→⑧a/⑪；安全门控 ⑪→⑫；输出链 ⑫→⑬→END；集成测试 |
 | F15 | 全工作流集成测试 | `tests/integration/test_agent_workflow.py` | Mock 存储 + Mock LLM，验证：正常路径（信息充足直接诊断）/ 追问循环（多轮追问后收敛）/ 检查循环（建议检查→结果回传→重新诊断）/ 信息不足路径 四条典型路径；安全门控过滤验证（过敏药物排除、配伍禁忌拦截） |
 
 ---
@@ -275,7 +275,7 @@
 | F11 | 条件路由：diagnose_router | [x] | 2026-05-12 | 纯函数：need_exam 且 exam_round<MAX → recommend_exam；否则 → safety_gate；5 unit PASS |
 | F12 | 节点 ⑪：safety_gate | [x] | 2026-05-12 | 规则层（allergy/pregnancy 直接抽取，spec §4.1.2 ⑪ TODO 重构方向待 B 阶段药品规则表落地）+ LLM 兜底（高安全级，失败保守追加通用警告）；4 unit PASS |
 | F13 | 节点 ⑫⑬：建议与输出 | [x] | 2026-05-12 | ⑫ generate_advice（failure_reason 三类对应 risk_warnings 提示）+ ⑬ format_response（失败兜底静态模板）；5 unit PASS |
-| F14 | StateGraph 编排 | [x] | 2026-05-12 | `src/agent/graph.py` 注册 16 节点 + 2 条件边；`build_app()` 默认 InMemorySaver；2 unit PASS（节点全 + compile 通过） |
+| F14 | StateGraph 编排 | [x] | 2026-05-12 | `src/agent/graph.py` 注册 17 节点 + 4 条件边（add 顺序见 graph.py:79-95；4 个 router：should_continue / diagnose_router / generate_followup_out_router / post_followup_router）；`build_app()` 默认 InMemorySaver；2 unit PASS（节点全 + compile 通过） |
 | F15 | 全工作流集成测试 | [x] | 2026-05-12 | 2 集成测试：正常 confirmed 全链路 + followup 触顶兜底全链路；interrupt resume 路径留 J 阶段 |
 
 ### 阶段 G：API 层与权限系统

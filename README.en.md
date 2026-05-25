@@ -1,11 +1,23 @@
 [简体中文](README.md) | [English](README.en.md)
 
-# Agentic-RAG Medical Care Assistant
+# Agentic-RAG Diagnose Assistant
 
 > Patient-side symptom self-check and initial diagnosis system, powered by a LangGraph Agent and multi-route RAG.
 >
 > **Personal portfolio project** (not production-deployed), covering data engineering → ML inference → Agent orchestration → backend → infrastructure → evaluation as a full end-to-end stack.
 > Spec-driven design and implementation, single source of truth: [DEV_SPEC.md](DEV_SPEC.md) (4976 lines, Chinese).
+
+---
+
+## Demo
+
+<div align="center">
+  <a href="https://streamable.com/kjmixi" title="Click to watch the 1-minute demo">
+    <img src="assets/demo-cover.png" alt="AI Doctor Demo — click to watch the full video" width="720"/>
+  </a>
+  <br/>
+  <sub>▶ Click the image to watch a 1-minute end-to-end conversation on Streamable (chief complaint → multi-round follow-up → report upload → diagnosis → medication advice)</sub>
+</div>
 
 ---
 
@@ -50,7 +62,7 @@
 
 ## Highlights
 
-> _Detailed in Chinese README §设计亮点 — 12 highlights covering full-stack ownership, multi-route RRF with multi-vector indexing, Small-to-Big parent/child chunking, single-GPU 16GB shared Embedding+Reranker, multimodal ingestion (text + tables + figures), LLM capability routing, idempotency + runtime degradation, 13-dimension HPI structured proactive questioning, single-LLM diagnosis with failure fallback (3-step chain retired per RAG eval — single-step achieves the same top1 93.5% / top3 100% at half the latency), Safety Gate as hard rail, 15-field `rag_trace` audit, centralized runtime constants (`agent_limits`)._
+> _Detailed in Chinese README §设计亮点 — 12 highlights covering full-stack ownership, multi-route RRF with multi-vector indexing, Small-to-Big parent/child chunking, single-GPU 16GB shared Embedding+Reranker, multimodal ingestion (text + tables + figures), LLM capability routing, idempotency + runtime degradation, 12-dimension HPI structured proactive questioning, single-LLM diagnosis with failure fallback (3-step chain retired per RAG eval — single-step achieves the same top-1 93.5% / top-2 100% at half the latency), Safety Gate as hard rail, 15-field `rag_trace` audit, centralized runtime constants (`agent_limits`)._
 
 ---
 
@@ -62,7 +74,7 @@
 
 ## Agent Workflow
 
-> _English content forthcoming. See [Chinese README §Agent 工作流](README.md#agent-工作流) for the LangGraph 16-node + 2-router state machine and interrupt-driven Human-in-the-Loop design._
+> _English content forthcoming. See [Chinese README §Agent 工作流](README.md#agent-工作流) for the LangGraph 17-node + 4-router state machine and interrupt-driven Human-in-the-Loop design._
 
 ---
 
@@ -75,6 +87,22 @@
 ## Tech Stack
 
 > _English content forthcoming. See [Chinese README §技术栈与选型理由](README.md#技术栈与选型理由)._
+
+---
+
+## Monitoring & Observability
+
+After one-shot startup of 13 containers, Prometheus auto-scrapes 6 targets (api / postgres / redis / milvus / node / dcgm) and Grafana auto-loads 2 dashboards. All LLM-call instrumentation is **written raw** — no decorators, no helpers, no context managers (see [DEV_SPEC §9.1](DEV_SPEC.md#9-全局实现契约跨章节)). ~300 lines of boilerplate across 20+ call sites is the explicit cost paid for clean exception scope, observable retries, and zero conflict with `with_retry` internals.
+
+<div align="center">
+  <img src="assets/grafana-app-performance.png" alt="Grafana — Application Performance" width="720"/>
+  <br/>
+  <sub>App performance: QPS / 5xx / HTTP P95 / LLM heavy (pro·vision) + light (flash) latency / retries·fallbacks / failure distribution / PG·Redis·Milvus dependency layer</sub>
+  <br/><br/>
+  <img src="assets/grafana-hardware-resources.png" alt="Grafana — Hardware Resources" width="720"/>
+  <br/>
+  <sub>Hardware: GPU utilization / VRAM / CPU / memory / disk / network (DCGM + Node Exporter)</sub>
+</div>
 
 ---
 
@@ -92,16 +120,16 @@ See [DEV_SPEC.md §8.4 progress table](DEV_SPEC.md#84-进度跟踪表). As of 20
 |---|---|---|
 | A | Engineering skeleton & infrastructure base | Done |
 | B | Data layer & model clients | Done |
-| C | Ingestion Pipeline | Main flow working (13 books ingested); production hardening pending |
+| C | Ingestion Pipeline | Main flow working (13 books planned, 12 ingested with zero boundary loss); production hardening pending |
 | D | Terminology (data shelved) | ICD-10 alias 40k+ ingested; not used at runtime |
 | E | Retrieval (Sparse / Dense / RRF / Reranker / Filter) | Done |
-| F | Agent workflow (16 nodes + 2 routers) | Done |
+| F | Agent workflow (17 nodes + 4 conditional routers) | Done |
 | G | API layer & permissions (7 items) | Done |
 | H | Infrastructure enhancements (Redis / Prometheus / Grafana / Loki / DCGM) | Done |
 | I | Evaluation system | **Mostly done** (RAG retrieval + diagnosis closed-loop + dual-layer LLM Judge; Agent multi-round follow-up evaluation pending) |
 | J | End-to-end acceptance & doc consolidation | J0 (Dockerization) done; J1-J6 pending |
 
-**Test coverage**: 342 unit PASS / 71 integration PASS (real PG + Milvus + Redis) / e2e reserved for J1-J4; 17 skipped (GPU models + known Milvus race).
+**Test coverage**: 333 unit PASS / 95 integration PASS (real PG + Milvus + Redis) / e2e reserved for J1-J4.
 
 ---
 

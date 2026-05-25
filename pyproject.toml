@@ -1,7 +1,7 @@
 [project]
 name = "medical-rag"
 version = "0.1.0"
-description = "Agentic RAG for medical care assistant"
+description = "Agentic RAG diagnose assistant"
 requires-python = ">=3.12,<3.13"
 
 dependencies = [

@@ -1,11 +1,23 @@
 [简体中文](README.md) | [English](README.en.md)
 
-# Agentic-RAG Medical Care Assistant
+# Agentic-RAG Diagnose Assistant
 
 > 患者侧症状自查与初诊判断系统 — 基于 LangGraph Agent + 多路检索 RAG。
 >
 > **个人练手项目**(非生产部署),涵盖数据工程 → ML 推理 → Agent 编排 → 后端 → 基础设施 → 评估的全栈端到端实现。
 > 设计与实现完全 spec-driven,单一事实源:[DEV_SPEC.md](DEV_SPEC.md)(4976 行)。
+
+---
+
+## 演示
+
+<div align="center">
+  <a href="https://streamable.com/kjmixi" title="点击观看 1 分钟 Demo">
+    <img src="assets/demo-cover.png" alt="AI 医生 Demo — 点击观看完整视频" width="720"/>
+  </a>
+  <br/>
+  <sub>▶ 点击图片跳转 Streamable 观看 1 分钟端到端对话(主诉 → 多轮追问 → 报告上传 → 诊断 → 用药建议)</sub>
+</div>
 
 ---
 
@@ -47,6 +59,7 @@
 - [RAG 流水线](#rag-流水线)
 - [数据层](#数据层)
 - [技术栈与选型理由](#技术栈与选型理由)
+- [监控与可观测性](#监控与可观测性)
 - [快速开始](#快速开始)
 - [评测结果](#评测结果)
 - [项目进度](#项目进度)
@@ -72,12 +85,12 @@
 
 | 层 | 我做了什么 |
 |---|---|
-| 数据处理 / RAG | • MinerU 解析 13 本医学教材(264948 文档块),每本教科书专配一套脚本精细化清洗切分<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块 (12/13 本零边界丢失)<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
+| 数据处理 / RAG | • MinerU 解析医学教材(13 本计划,目前已完成 12 本,共 264948 文档块),每本教科书专配一套脚本精细化清洗切分,12 本均零边界丢失<br>• 父子两级分块:外层按章节切出父块、内层按 token 切出子块<br>• 每块产出原文 + LLM enrichment 摘要 + LLM enrichment 3个假设患者问题, + BM25 倒排,共 26054 块 / 129810 向量入 Milvus<br>• 先 PG 后 Milvus 双写,幂等可重跑 + 自动清理孤儿块 |
 | Embedding / Reranker | • Qwen3-Embedding-8B(8.5GB)+ BGE-Reranker-v2-minicpm-layerwise(2.6GB) INT8 量化单卡 16GB 共显<br>• 精排 layerwise 早退加速;失败 / 超时回退到召回原序 |
-| Agent | • LangGraph 15 节点 + 2 条件分支组织成状态机<br>• **13 维 HPI 结构化主动问诊**:④ 节点 1 LLM 调用同时出追问(slot 维度填补 + open 开放式兜底)+ unaskable 粗筛,信息已足时直接跳诊断,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断 1 步 LLM 出 ranking + retained_unaskable(对齐 RAG 评测口径 top1 93.5%),失败重试 3 次仍报错则早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 按能力路由**:主链 DeepSeek 跑文本结构化输出,多模态分支 DashScope qwen3.5-plus 跑报告解析 + ⑩ 诊断推理(原生多模态) |
+| Agent | • LangGraph **17 节点 + 4 条件分支**组织成状态机<br>• **12 维 HPI 结构化主动问诊**:⑤ 节点 1 LLM 调用同时出追问(slot 维度填补 + open 开放式兜底)+ unaskable 粗筛,信息已足时直接跳诊断,而非被动等用户描述<br>• Human in loop: 暂停等待用户输入(多轮澄清病史 / 上传补充检查报告)<br>• 诊断 1 步 LLM 出 ranking + retained_unaskable(对齐 RAG 评测口径 top1 93.5%),失败重试 3 次仍报错则早停告知"信息不足以确诊"<br>• 最终输出经独立安全过滤,规避处方剂量与确诊口吻<br>• **LLM 三档路由**:7 处 flash(翻译/抽取)+ 3 处 pro(鉴别推理/安全/用药)+ 2 处 vision(报告解析 / ⑩ 多模态诊断),详见下方 §6 |
 | 后端 | • FastAPI + JWT 实现注册 / 登录 / 角色守卫<br>• 限流先抽象后实现:单机内存版可换多副本 Redis 共享版,业务代码不动<br>• PostgreSQL 20 表 + Alembic 6 次迁移<br>• 每次问诊同事务写响应 + 15 字段审计链路(90 天保留) |
 | 基础设施 | • Docker Compose 13 容器一键启动<br>• Prometheus 6 监控目标 + 11 类业务指标(LLM 健康度 / 上下文长度 / PG·Redis·Milvus 三层依赖)<br>• Grafana 启动自动加载 2 仪表盘(应用 + 硬件);日志面板点击跳数据库审计详情<br>• 每请求一个 trace ID 串日志 / 审计 / 监控三路<br>• **基础设施降级哲学**:Redis 挂回源 PG / 限流 fail-open / Reranker 超时回退原序,故障半径控死在一层 |
-| 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 342 单元 + 71 集成 PASS |
+| 工程过程 | • Spec-driven 协作开发:[DEV_SPEC.md](DEV_SPEC.md) 唯一事实源,[CLAUDE.md](CLAUDE.md) 锚定开发红线<br>• 我做架构与取舍判断,Claude 落地代码 + 反向同步 §8.4 进度<br>• 测试 333 单元 + 95 集成 PASS |
 
 ### 2. 多路检索 + 多向量索引(单阶段加权 RRF)
 
@@ -127,14 +140,22 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 
 图表 chunk 共享父块的 `heading_path_id`,在召回时通过 **同节图表跟随父块**(规则 3,封顶 5 条)的回拉机制保证图表必然被带出来。详见 [DEV_SPEC §3.1.2 / §3.2.3](DEV_SPEC.md#312-chunking目录权威清单--三遍切--size-驱动子块)。
 
-### 6. LLM 按能力路由(主链 + 多模态分流)
+### 6. LLM 按能力路由(三档分流:flash / pro / vision)
 
-不是一个 LLM 干所有事 — 按"调用是否要看图片"分流:
+不是一个 LLM 干所有事 — **按"任务复杂度 + 是否要看图"三档分流**,12 处 LLM 调用分到 3 个模型上:
 
-- **主链 DeepSeek**(文本推理便宜):14 处结构化输出(意图识别 / 症状提取 / 鉴别诊断 / 安全过滤等)
-- **多模态分支 DashScope qwen3.5-plus**:初诊报告解析、检查报告解析(看患者上传的 PDF / 影像截图)
+| 档位 | 模型 | 适用任务 | 节点(共 12 处) |
+|---|---|---|---|
+| **flash**(轻型, ~1-5s) | DeepSeek-v4-flash | 翻译 / 格式整合 / 一次性抽取(语义浅) | ① info_collect, ② build_query(dense 改写), ⑤ generate_followup(Step A holistic + Step B 拼句), ⑦ process_followup, ⑧a recommend_exam, ⑬ format_response(7 处) |
+| **pro**(重型, ~5-20s) | DeepSeek-v4-pro(thinking) | 鉴别诊断推理 / 安全推理 / 治疗方案 | ④ select_discriminative_symptom, ⑪ safety_gate, ⑫ generate_advice(3 处) |
+| **vision**(多模态, ~30-120s) | DashScope qwen3.5-plus | 看图(报告 PDF / 影像截图)+ 临床推理 | ①.5 analyze_initial_reports, ⑨ process_exam_result(共享 parse_reports), ⑩ diagnose(原生多模态)(2 处)|
 
-省钱(主链 ~5× 便宜)+ 该用多模态时不阉割能力。
+**为什么这样分**:
+- flash 拿来做"翻译型" 任务(填槽、改写 query、归位回答)— pro 在这种任务上**没增量价值** 但贵 5×、慢 5-10×
+- pro 留给真要"推理"的环节(鉴别诊断、安全护栏、用药方案)— 临床推理深度跟模型能力直接挂钩
+- vision 专门跑要看图的(报告解析、⑩ 多模态诊断) — flash/pro 都不支持视觉
+
+实际收益(2026-05-24 切 flash 后):② dense_query 从 85s → 15s,⑬ format_response 从 8s → 2s,info_collect 从 ~60s → ~12s。**端到端延迟整体下降 ~40%**。详见 [DEV_SPEC §9.3 LLM 调用清单](DEV_SPEC.md#9-全局实现契约跨章节)。
 
 ### 7. 鲁棒性:写入幂等 + 运行时降级
 
@@ -152,9 +173,9 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 
 不写无止境重试,**故障半径控死在一层**。详见 [DEV_SPEC §3.1.4 / §3.1.6](DEV_SPEC.md#314-幂等性设计idempotency)。
 
-### 8. 13 维 HPI 结构化主动问诊
+### 8. 12 维 HPI 结构化主动问诊
 
-不是被动等用户自由描述,按医学**现病史 13 维 schema**(`PresentIllnessSlots`)主动追问:
+不是被动等用户自由描述,按医学**现病史 12 维 schema**(`PresentIllnessSlots`)主动追问:
 
 | 维度 | 字段 | 维度 | 字段 |
 |---|---|---|---|
@@ -162,31 +183,31 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 | 起病方式 | `onset_mode` | 缓解因素 | `relieving` |
 | 诱因 | `trigger` | 伴随症状 | `associated_symptoms` |
 | 部位 | `location` | 病程演变 | `progression` |
-| 性质 | `nature` | 诊疗经过 | `treatment_tried` |
-| 程度 | `severity` | 治疗反应 | `treatment_response` |
-| 时间规律 | `duration_pattern` | | |
+| 性质 | `nature` | 诊疗经过 | `treatments`(半结构化 `<治疗>: <反应>`)|
+| 程度 | `severity` | 时间规律 | `duration_pattern` |
 
-**1 次 LLM 同时出追问 + unaskable 粗筛**(节点 ④ `select_discriminative_symptom`):
+**1 次 LLM 同时出追问 + unaskable 粗筛**(节点 ⑤ `select_discriminative_symptom`):
 
-1. **输入**:13 维 HPI 已填 / 空缺 + 已确认/否认/不确定症状 + 主诉 + 现病史
-2. **LLM 任务 1 — `questions`**(≤ `MAX_FOLLOWUP_QUESTIONS=5`,可为 0):
-   - `type="slot"`:从空缺维度里挑诊断价值最高且 patient-answerable 的(时间/部位/性质/诱因/缓解等)
+1. **输入**:12 维 HPI 已填 / 空缺 + 已确认/否认/不确定症状 + 主诉 + 现病史
+2. **LLM 任务 1 — `askable`**(≤ `MAX_FOLLOWUP_QUESTIONS=5`,可为 0):
+   - `type="targeted"`:从空缺维度里挑诊断价值最高且 patient-answerable 的(时间/部位/性质/诱因/缓解等)
    - `type="open"`:开放式问"还有别的不舒服吗?"(一轮最多 1 条)
    - 信息已足时返空 → `should_continue` 路由跳诊断
-3. **LLM 任务 2 — `unaskable_symptoms`**(≤ 5,可为 0):"想知道但患者答不上的体征"粗筛(`{description, reason}`),后续 ⑩ 基于诊断结果精筛覆盖
-4. **追问硬上限**:`MAX_FOLLOWUP_ROUNDS=8` 兜底,触顶 → ⑩ Step -1 短路出 `insufficient`
+3. **LLM 任务 2 — `unaskable`**(≤ 5,可为 0):"想知道但患者答不上的体征"粗筛(`{description, reason}`),后续 ⑩ 基于诊断结果精筛覆盖
+4. **L2 硬去重**:每轮 askable 注入 `asked_targets` 已问列表,LLM 不能换皮重出
+5. **追问硬上限**:`MAX_FOLLOWUP_ROUNDS=8` 兜底,触顶 → ⑩ Step -1 短路出 `insufficient`
 
-> 原"TF-IDF + 信息增益 + 可问性评估"4 步算法(④ `extract_symptoms` + ⑤ 4 LLM)整体废弃 — 实测 TF-IDF 抽出 94% 是医学教材通用高频词,信息增益的可比 key 立不起来。改 LLM 1 次基于 state 直接选,利用 LLM 内化的医学鉴别诊断知识。详见 [EL_DESIGN_REVIEW §11](EL_DESIGN_REVIEW.md)。
+> 原"TF-IDF + 信息增益 + 可问性评估"4 步算法(原 `extract_symptoms` + 4 LLM)整体废弃 — 实测 TF-IDF 抽出 94% 是医学教材通用高频词,信息增益的可比 key 立不起来。改 LLM 1 次基于 state 直接选,利用 LLM 内化的医学鉴别诊断知识。详见 [EL_DESIGN_REVIEW §11](EL_DESIGN_REVIEW.md)。
 
 ### 9. 1 步诊断推理 + 失败兜底
 
 ⑩ `diagnose` 1 LLM 调用直接出 `DiagnosisOutput`(原生多模态 DashScope qwen3.5-plus,对齐 RAG 评测口径):
 
-- **输入**:全量患者画像(主诉 + 现病史 + 13 维 slots + 已确认/否认/不确定症状 + 病史摘要 + 报告发现)+ 文献父块全文 + figure 多模态截图 + ④ 粗筛 unaskable
+- **输入**:全量患者画像(主诉 + 现病史 + 12 维 slots + 已确认/否认/不确定症状 + 病史摘要 + 报告发现)+ 文献父块全文 + figure 多模态截图 + ⑤ 粗筛 unaskable
 - **输出**:`results: list[RankedDisease]`(每项含 `disease/probability/evidence/differentiation/differentiation_type`)+ `retained_unaskable`(基于诊断结果精筛后覆盖 state,供 ⑧a 消费)
 - **失败兜底**:LLM 重试 3 次仍失败 → 出 `insufficient` 并写 `failure_reason="step_1_structured_output_failed: ..."`;还有 Step -1 在 `followup_round >= MAX_FOLLOWUP_ROUNDS` 时直接短路
 
-> 原"3 步链(`EvidenceSheet → DiagnosisRanking → DiagnosisOutput`)"整体废弃 — 评测证明 1 步 LLM + 信息全给已经能拿 top1 93.5% / top3 100%,3 步链让总延迟 4-6 分钟、且 Step 3"概率校准"是伪能力(同款 LLM 自校自不会本质改变判断)。详见 [DEV_SPEC §4.1.2 ⑩](DEV_SPEC.md#41-agent工作流) + [§9.1 / §9.3](DEV_SPEC.md#9-全局实现契约跨章节)。
+> 原"3 步链(`EvidenceSheet → DiagnosisRanking → DiagnosisOutput`)"整体废弃 — 评测证明 1 步 LLM + 信息全给已经能拿 top1 93.5% / top2 100%,3 步链让总延迟 4-6 分钟、且 Step 3"概率校准"是伪能力(同款 LLM 自校自不会本质改变判断)。详见 [DEV_SPEC §4.1.2 ⑩](DEV_SPEC.md#41-agent工作流) + [§9.1 / §9.3](DEV_SPEC.md#9-全局实现契约跨章节)。
 
 ### 10. Safety Gate 作为硬性安全闸
 
@@ -287,44 +308,54 @@ graph TB
 
 ## Agent 工作流
 
-> 引自 [DEV_SPEC §4.1](DEV_SPEC.md#41-agent工作流) — 实线为正常顺序边,虚线为条件路由(`should_continue` / `diagnose_router`)。
+> 引自 [DEV_SPEC §4.1.3](DEV_SPEC.md#413-edge-路由与条件分支) — 实线为正常顺序边,虚线为条件路由(`should_continue` / `diagnose_router` / `intake_router`)。
 
 ```mermaid
 %%{init: {'flowchart': {'curve': 'linear'}}}%%
 graph TD;
-    __start__([__start__]):::first
-    N1("① info_collect<br/><i>主诉提取 + 病史/报告加载（单轮无交互）</i>")
-    N1b("①.5 analyze_initial_reports<br/><i>多模态LLM直读报告 → 提取结构化发现 → report_findings</i>")
-    N2("② build_query<br/><i>LLM NER + Sparse 多字段直采 + Query 构建/改写</i>")
+    __start__(["⓪ __start__"]):::first
+    N0a("⓪a initial_ask<br/><i>• 0 LLM, 出 3 个问题等回答:还有别的不舒服吗 / 过敏慢病用药 / 孕期哺乳(女性才问)<br/>• 拉患者档案</i>")
+    N1("① info_collect<br/><i>一次 LLM 同时:<br/>• 拆主诉 + 现病史 + 12 维细节<br/>• 解析 ⓪a 答的过敏/慢病/孕期 + 提取新症状, 合并写回 state</i>")
+    N1b("①.5 analyze_initial_reports<br/><i>interrupt 问有无报告 → 加载/多模态解析 → report_findings</i>")
+    N1c("intake_followup_ask<br/><i>• 分批问 12 维slot(每批 4 个 + 1 个'还有别的不适吗')<br/>• 全部收完一次 LLM 综合翻译,归位回答至结构化字段 </i>")
+    N2("② build_query<br/><i>Sparse 多字段直采 + LLM Dense Query 改写</i>")
     N3("③ retrieve<br/><i>全量向量召回</i>")
-    N4("④ select_discriminative_symptom<br/><i>优先追问13维slot空缺+开放症状询问,后LLM构建高价值可问症状</i>")
-    N5("⑤ generate_followup<br/><i>生成追问问题</i>")
-    N6("⑥ wait_followup_answer<br/><i>interrupt 等待用户回答</i>")
-    N7("⑦ process_followup_answer<br/><i>处理追问回答</i>")
-    N8("⑧a recommend_exam<br/><i>生成检查建议</i>")
+    N4("④ select_discriminative_symptom<br/><i>根据召回结果出鉴别诊断追问 + 同时写 unaskable 粗筛(供 ⑩ 精筛)</i>")
+    subgraph FollowupLoop[" "]
+        direction TB
+        N5("⑤ generate_followup<br/><i>检索前 holistic gate(1 次 LLM 看全量 state)<br/>• askable:患者主观能答的(性质/诱因/缓解/放射/伴随…)<br/>• unaskable:必须查体/化验/影像才能知道的(Murphy 征/T3/B 超…)<br/>• unaskable_symptoms 每轮都写, 供下游 ⑩/⑧a 消费</i>")
+        N6("⑥ wait_followup_answer<br/><i>等用户回答追问</i>")
+        N7("⑦ process_followup_answer<br/><i>LLM 把用户回答翻译成结构化字段写回 state, 清掉本轮问题列表</i>")
+    end
+    N8("⑧a recommend_exam<br/><i>综合已有信息 → 推患者友好检查清单(两入口都可补常规鉴别项)<br/>• ⑤ 入口: 无诊断结果, 凭主诉判<br/>• ⑩ 入口: 有诊断结果当 prior, 按候选排优先级</i>")
     N8b("⑧b wait_exam_report<br/><i>interrupt 等待检查结果</i>")
     N9("⑨ process_exam_result<br/><i>处理检查结果回传</i>")
-    N10("⑩ diagnose<br/><i>诊断推理(可选 Cross-Encoder 截断 + 父块扩展 + 多模态 LLM 一步出结果)</i>")
+    N10("⑩ diagnose<br/><i>诊断推理(可选 Cross-Encoder 截断 + 父块扩展 + 多模态 LLM 一步出结果)<br/>• 同时精筛/改写/新产 unaskable_symptoms(覆盖上游粗筛, 供 ⑧a 推检查)</i>")
     N11("⑪ safety_gate<br/><i>安全约束门控（规则+LLM）</i>")
     N12("⑫ generate_advice<br/><i>生成建议</i>")
     N13("⑬ format_response<br/><i>格式化最终回复</i>")
     __end__([__end__]):::last
 
-    __start__ -->|"入口"| N1;
-    N1 -->|"主诉提取+DB病史/报告加载"| N1b;
-    N1b -->|"exam_reports 非空：解析报告→report_findings；为空：early return 透传"| N2;
-    N2 -->|"NER→Sparse 多字段直采→构建dense_query+sparse_queries"| N3;
-    N3 -->|"混合检索 → RRF → Top-N 截断 → 覆盖 candidate_chunks"| N4;
-    N4 -.->|"followup_questions 非空 → 继续追问"| N5;
-    N4 -.->|"followup_questions 为空 → 进入诊断"| N10;
-    N5 -->|"生成问题写入State"| N6;
-    N6 -->|"interrupt等待用户回答"| N7;
-    N7 -->|"更新症状,重新召回"| N2;
+    __start__ -->|"单边入口"| N0a;
+    N0a -->|"用户答完 → ① 一次 LLM 同时抽主诉 + 解析用户答案"| N1;
+    N1 -->|"主诉/现病史 已抽出 → 看患者要不要传报告"| N1b;
+    N1b -->|"报告环节走完 → 开始入站追问"| N1c;
+    N1c -->|"slot 已翻译进 state, 交给 ⑤ 做检索前 holistic gate"| N5;
+    N2 -->|"组装检索 query"| N3;
+    N3 -->|"拿到候选医学知识 chunks"| N4;
+    N4 -.->|"信息够了 → 直接诊断"| N10;
+    N4 -.->|"还需追问鉴别诊断信息 → 直接出题让用户答"| N6;
+    N5 -.->|"askable 问题 → 让用户答"| N6;
+    N5 -.->|"无 askable 但有 unaskable → 走首诊推单"| N8;
+    N5 -.->|"都空 → 直接进检索"| N2;
+    N6 -->|"用户答完 → 由 ⑦ 翻译"| N7;
+    N7 -.->|"还没进过检索(intake 后这条路) → 回 ⑤ 再判一次"| N5;
+    N7 -.->|"已经检索过(④ 鉴别诊断追问答完), 或轮数已达上限 → 回检索"| N2;
+    N10 -.->|"需要患者去做检查再鉴别"| N8;
+    N10 -.->|"可下结论 → 走安全门控"| N11;
     N8 -->|"生成建议写入State"| N8b;
     N8b -->|"interrupt等待检查结果"| N9;
     N9 -->|"新证据回传,重新召回"| N2;
-    N10 -.->|"need_exam 且 exam_round < 3 → 需检查鉴别"| N8;
-    N10 -.->|"confirmed/insufficient/exam_round ≥ 3 → 进入安全门控"| N11;
     N11 -->|"过敏/用药/妊娠约束过滤"| N12;
     N12 -->|"用药/检查/高危提示"| N13;
     N13 -->|"输出最终回复"| __end__;
@@ -332,14 +363,16 @@ graph TD;
     classDef default fill:#ffffff,stroke:#333,stroke-width:1px,color:#000,line-height:1.2;
     classDef first fill:#f0f0f0,stroke:#999,color:#000;
     classDef last fill:#d4cffc,stroke:#333,color:#000;
+    style FollowupLoop fill:none,stroke:none
 ```
 
 > 易错点(实现时会反复遇到):
 >
-> - ⑧ 拆 `a`/`b` 两半,⑤+⑥ 也是分离设计(generate / wait),`interrupt()` 与 LLM 调用分离,resume 时 LLM 不会重发
+> - ⑧/⑥ 拆 `a`/`b` 两半,`interrupt()` 与 LLM 调用分离,resume 时 LLM 不会重发
 > - `should_continue` 是 **纯函数**,不允许写 state(cap 处理放在 ⑩ Step -1)
 > - ⑩ 1 步 LLM 失败 → 短路 `insufficient` + `failure_reason="step_1_structured_output_failed: ..."`
-> - `present_illness_slots` 13 维度,空槽驱动 ④ 维度追问
+> - `present_illness_slots` 12 维度,空槽驱动 ⑤ 维度追问
+> - ⑤ holistic gate 出 `askable_targets`,⑦ 落回 state 后 append 到 `asked_targets` 做 L2 硬去重,防 LLM 换皮重出
 
 ---
 
@@ -463,14 +496,30 @@ PostgreSQL 20 表按职责分四组,完整 SQL DDL 见 [DEV_SPEC §2.4](DEV_SPEC
 
 ---
 
+## 监控与可观测性
+
+13 容器一键启动后,Prometheus 自动 scrape 6 目标(api / postgres / redis / milvus / node / dcgm),Grafana 启动自动加载 2 仪表盘。所有 LLM 调用埋点**完全裸写** —— 无装饰器 / 无 helper / 无 context manager(详见 [DEV_SPEC §9.1](DEV_SPEC.md#9-全局实现契约跨章节)),20+ 调用点约 300 行重复样板换"异常作用域清晰 + 重试可观察 + 与 `with_retry` 内部行为不打架"。
+
+<div align="center">
+  <img src="assets/grafana-app-performance.png" alt="Grafana — 应用性能大盘" width="720"/>
+  <br/>
+  <sub>应用性能:QPS / 5xx / HTTP P95 / LLM 重型(pro·vision)轻型(flash) 延迟 / 重试·兜底 / 失败分布 / PG·Redis·Milvus 依赖层</sub>
+  <br/><br/>
+  <img src="assets/grafana-hardware-resources.png" alt="Grafana — 硬件资源大盘" width="720"/>
+  <br/>
+  <sub>硬件资源:GPU 利用率 / 显存占用 / CPU / 内存 / 磁盘 / 网络(DCGM + Node Exporter)</sub>
+</div>
+
+---
+
 ## 快速开始
 
 主路径 = 全 docker compose 一键起。host 跑 uvicorn 仅作为热重载调试备选。
 
 ```bash
 # 1. 克隆
-git clone https://github.com/<your-org>/Agentic-RAG-Medical-care-Assistant.git
-cd Agentic-RAG-Medical-care-Assistant
+git clone https://github.com/Handshakeworm/Agentic-RAG-diagnose-Assistant.git
+cd Agentic-RAG-diagnose-Assistant
 
 # 2. 配置环境变量
 cp .env.example .env
@@ -515,14 +564,6 @@ uvicorn src.api.app:app --host 0.0.0.0 --port 8000 --reload
 # 想用 nginx 反代到 host uvicorn(让限流 / trace_id 链路也走通):
 docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d nginx
 ```
-
----
-
-## 演示
-
-> 待补:curl 端到端调用截图 / Grafana 监控大盘截图 / (可选)前端 UI。
-
----
 
 ## 评测结果
 
@@ -580,7 +621,7 @@ LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth
 |---|---|
 | **Reranker 默认关闭** | K=20 下 BGE Reranker 全主指标无优势(NDCG -0.076 / Hit -1.6pp / MRR -0.065),省 2.6GB GPU + 5s 延迟 |
 | **RRF 动态加权** `dense_weight = max(1, N_sparse/5)` | 等权下 dense 单路被 sparse 多路挤兑,加权后 Top-20 内 dense exclusive chunks 保留量 ×6.5 |
-| **Sparse 多字段直采** | state 字段拼接(chief + 13 维 slots + report findings)→ N 路独立 BM25;实测 N=12~30(均 21.8),信号比单 query 拼接更全 |
+| **Sparse 多字段直采** | state 字段拼接(chief + 12 维 slots + report findings)→ N 路独立 BM25;实测 N=12~30(均 21.8),信号比单 query 拼接更全 |
 | **20 unique parents 喂 LLM**(对齐 LLM Judge 口径) | parent 不参与 embedding,需从 Top-200 chunks 顺序去重 |
 
 ### 4. 评测方法 + 数据 + 脚本
@@ -633,13 +674,13 @@ LLM 给出的 4 个候选(按概率降序):
 | C | Ingestion Pipeline | 主流程跑通(13 本灌库),production 化收口待补 |
 | D | 术语库(数据备用) | ICD-10 alias 40k+ 已灌库,运行时不调用 |
 | E | Retrieval(Sparse / Dense / RRF / Reranker / Filter) | 完成 |
-| F | Agent 工作流(16 节点 + 2 路由) | 完成 |
+| F | Agent 工作流(17 节点 + 4 条件路由) | 完成 |
 | G | API 层与权限系统(7 项) | 完成 |
 | H | 基础设施增强(Redis / Prometheus / Grafana / Loki / DCGM) | 完成 |
 | I | 评估体系 | **主体完成**(检索 RAG 评测 + 诊断闭环 + 双层 LLM Judge,见上"评测结果";Agent 多轮追问评测待补)|
 | J | 端到端验收与文档收口 | J0(Docker 化部署)完成,J1-J6 待开始 |
 
-**测试覆盖**:unit 342 PASS / integration 71 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
+**测试覆盖**:unit 333 PASS / integration 95 PASS(真 PG + Milvus + Redis)/ e2e 留 J1-J4;skip 17(GPU 模型 + 已知 Milvus race)。
 
 ---
 
@@ -656,7 +697,7 @@ LLM 给出的 4 个候选(按概率降序):
 ├── alembic.ini              # 数据库迁移配置
 │
 ├── src/
-│   ├── agent/               # LangGraph 16 节点 + state.py + graph.py
+│   ├── agent/               # LangGraph 17 节点 + state.py + graph.py
 │   │   ├── nodes/           # ① info_collect ~ ⑬ format_response
 │   │   ├── routers/         # should_continue / diagnose_router
 │   │   └── utils/           # patient_repo / report_parser / chunks_lookup
@@ -671,7 +712,7 @@ LLM 给出的 4 个候选(按概率降序):
 │   │   ├── milvus/          # docs_collection + terms_collection(数据备用)
 │   │   └── postgres/        # ORM(20 表)+ Alembic versions/
 │   ├── models/              # Embedding / Reranker / LLM 客户端封装
-│   ├── prompts/             # ingestion + agent 14 prompt builders
+│   ├── prompts/             # ingestion + agent 12 prompt builders
 │   └── common/              # metrics(§9.1)/ hashing / normalize
 │
 ├── config/
@@ -706,8 +747,8 @@ LLM 给出的 4 个候选(按概率降序):
 │
 ├── evaluation/              # 预留(在线追踪/生产评测,待补)
 └── tests/
-    ├── unit/                # 342 PASS(全 mock)
-    ├── integration/         # 71 PASS / 17 skip(真 PG + Milvus + Redis)
+    ├── unit/                # 333 PASS(全 mock)
+    ├── integration/         # 95 PASS(真 PG + Milvus + Redis)
     └── e2e/                 # 真 LLM API(J 阶段)
 ```
 
@@ -719,7 +760,7 @@ LLM 给出的 4 个候选(按概率降序):
   - [§1 项目总览](DEV_SPEC.md#1-项目总览)
   - [§2 技术选型](DEV_SPEC.md#2-技术选型)(Embedding / Reranker / LLM / 数据存储的 why)
   - [§3 RAG 系统设计](DEV_SPEC.md#3-rag系统设计)(摄取 / chunking / enrichment / 多向量 / 召回 / 精排)
-  - [§4 Agent 设计](DEV_SPEC.md#4-agent设计)(State / 16 节点详解 / 上下文管理)
+  - [§4 Agent 设计](DEV_SPEC.md#4-agent设计)(State / 17 节点详解 / 上下文管理)
   - [§5 基础设施](DEV_SPEC.md#5-基础设施)(性能 / 监控 / 管理)
   - [§6 评估](DEV_SPEC.md#6-评估)(RAG 离线 / Agent 离线 / LLM Judge / 在线)
   - [§9 全局实现契约](DEV_SPEC.md#9-全局实现契约跨章节) — **跨章节工程契约**(LLM 调用模板 / Pydantic schema / 运行时常量 / 审计字段)

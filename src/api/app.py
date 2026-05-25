@@ -30,7 +30,7 @@ from src.db.postgres.connection import get_engine
 from src.db.postgres.metrics import install_engine_metrics
 
 
-_API_TITLE = "Agentic RAG Medical Care Assistant API"
+_API_TITLE = "Agentic RAG Diagnose Assistant API"
 _API_VERSION = "0.1.0"
 
 # /ui 静态前端目录(portfolio 演示用,见 ui/index.html)。同源挂载避免 CORS,

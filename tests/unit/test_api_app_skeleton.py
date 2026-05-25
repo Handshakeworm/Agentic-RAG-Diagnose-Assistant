@@ -33,7 +33,7 @@ def test_create_app_returns_independent_instance() -> None:
     app_a = create_app()
     app_b = create_app()
     assert app_a is not app_b
-    assert app_a.title == app_b.title == "Agentic RAG Medical Care Assistant API"
+    assert app_a.title == app_b.title == "Agentic RAG Diagnose Assistant API"
 
 
 def test_module_level_app_is_fastapi_instance() -> None:
