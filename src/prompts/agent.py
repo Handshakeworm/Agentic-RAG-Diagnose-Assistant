@@ -120,13 +120,34 @@ def build_info_collect_prompt(
 2. present_illness(现病史):用 1-3 句话展开本次发病的:起病时间、诱因、症状特点
    (部位/性质/程度)、伴随症状、加重/缓解因素、治疗经过 —— **主要来源 patient_input**
 3. present_illness_slots(12 维结构化槽位)—— **主要来源 patient_input**,form 答案附带的细节
-   也可填入:
-   - 单值槽(str | None):onset_time / onset_mode / location / duration_pattern / progression
-   - 多值槽(list[str]):aggravating(加重因素) / relieving(缓解因素) /
-     associated_symptoms(伴随症状) / trigger(诱因,可叠加) / nature(性质,可多) /
-     severity(程度,主观描述 + NRS 评分可叠加) /
-     treatments(诊疗经过,每条半结构化 '<治疗>: <反应>',如 ['布洛芬: 无效', '热敷: 部分缓解'])
-   - 患者**未提及**的维度严格保持 None / 空列表,**不要瞎填**{form_extraction_lines}
+   也可填入。**类型铁律(写错会直接报错):**
+   - 单值槽(类型 `str | None`,5 个):onset_time / onset_mode / location / duration_pattern / progression
+     - 患者提及 → 写 str(如 `"右上腹"`)
+     - 患者未提及 → 写 **null**(**绝不可写 `""` 或 `[]` 或 `["right"]`**)
+   - 多值槽(类型 `list[str]`,7 个):trigger / nature / severity / aggravating / relieving /
+     associated_symptoms / treatments
+     - 患者提及 → 写 list,如 `["饭后", "夜间"]`
+     - 患者未提及 → 写 **`[]` 空数组**(**绝不可写 `null` / `""` / `"无"`**)
+     - treatments 每条半结构化 '<治疗>: <反应>',如 `["布洛芬: 无效", "热敷: 部分缓解"]`
+   - **再次强调:单值槽用 null,多值槽用 [],两者绝不互换**{form_extraction_lines}
+
+【present_illness_slots 完整结构示例(必须严格按此 key 名 + 类型)】
+```json
+{{
+  "onset_time": "3天前",         // str | null
+  "onset_mode": null,            // str | null
+  "trigger": ["进食油腻"],        // list[str],没就 []
+  "location": "右上腹",          // str | null,**单个部位也是 str 不是 list**
+  "nature": ["绞痛"],            // list[str],没就 []
+  "severity": [],                // list[str],**患者没说也写 [] 不是 null**
+  "duration_pattern": "间歇性",  // str | null
+  "aggravating": ["饭后"],       // list[str]
+  "relieving": [],               // list[str]
+  "associated_symptoms": ["恶心"], // list[str]
+  "progression": null,           // str | null
+  "treatments": []               // list[str]
+}}
+```
 
 注意:这是初诊采集,信息缺失是正常的,后续会通过追问补全。""" + _JSON_TAIL
 

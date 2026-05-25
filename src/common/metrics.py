@@ -58,6 +58,9 @@ _latency = Histogram(
     "structured_output_latency_seconds",
     "LLM 结构化输出调用端到端耗时(finally 块用 time.perf_counter() 差值 .observe())",
     ["node", "schema"],
+    # 2026-05-25:默认桶最大 10s,LLM 调用真实范围 1-180s(flash 1-15s / pro 5-30s /
+    # vision 30-180s),所有 > 10s 样本都被压平显示成"10s"。改自定义桶覆盖真实分布。
+    buckets=(0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 20.0, 30.0, 45.0, 60.0, 90.0, 120.0, 180.0, 300.0),
 )
 
 _diagnose_reason = Counter(

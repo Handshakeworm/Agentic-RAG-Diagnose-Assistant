@@ -12,105 +12,222 @@
     {
       "title": "QPS - HTTP 总请求率",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total[1m])) by (handler)",
+          "expr": "sum(rate(http_requests_total{handler!=\"none\"}[1m])) by (handler)",
           "legendFormat": "{{handler}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "reqps" }
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     },
     {
       "title": "HTTP 5xx 错误率",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 0 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "targets": [
         {
-          "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m])) / sum(rate(http_requests_total[1m]))",
+          "expr": "(sum(rate(http_requests_total{status=~\"5..\",handler!=\"none\"}[1m])) or vector(0)) / sum(rate(http_requests_total{handler!=\"none\"}[1m]))",
           "legendFormat": "5xx ratio",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "percentunit", "max": 1, "min": 0 }
+        "defaults": {
+          "unit": "percentunit",
+          "max": 1,
+          "min": 0,
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     },
     {
       "title": "HTTP 端到端延迟 P95",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 6 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (handler, le))",
+          "expr": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{handler!=\"none\"}[5m])) by (handler, le))",
           "legendFormat": "P95 {{handler}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     },
     {
-      "title": "LLM 结构化输出延迟 P50/P95",
+      "title": "LLM 近 2 分钟平均延迟 - 重型节点(pro / vision)",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 6 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.5, sum(rate(structured_output_latency_seconds_bucket[5m])) by (node, le))",
-          "legendFormat": "P50 {{node}}",
+          "expr": "sum(rate(structured_output_latency_seconds_sum{schema=~\"SmartFollowupOutput|SafetyGateOutput|AdviceOutput|ReportFindings|DiagnosisOutput\"}[2m])) by (schema) / sum(rate(structured_output_latency_seconds_count{schema=~\"SmartFollowupOutput|SafetyGateOutput|AdviceOutput|ReportFindings|DiagnosisOutput\"}[2m])) by (schema)",
+          "legendFormat": "{{schema}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
+      }
+    },
+    {
+      "title": "LLM 近 2 分钟平均延迟 - 轻型节点(flash)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(structured_output_latency_seconds_sum{schema=~\"InfoCollectOutput|QueryConstructionOutput|FollowupParseResult|HolisticGateDecision|QuestionGenOutput|RecommendExamOutput|free_text\"}[2m])) by (schema) / sum(rate(structured_output_latency_seconds_count{schema=~\"InfoCollectOutput|QueryConstructionOutput|FollowupParseResult|HolisticGateDecision|QuestionGenOutput|RecommendExamOutput|free_text\"}[2m])) by (schema)",
+          "legendFormat": "{{schema}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
+      }
+    },
+    {
+      "title": "LLM 重试 / 兜底 近 5 分钟次数",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(structured_output_retry_total[5m])) by (node)",
+          "legendFormat": "retry {{node}}",
           "refId": "A"
         },
         {
-          "expr": "histogram_quantile(0.95, sum(rate(structured_output_latency_seconds_bucket[5m])) by (node, le))",
-          "legendFormat": "P95 {{node}}",
+          "expr": "sum(increase(structured_output_fallback_triggered_total[5m])) by (node)",
+          "legendFormat": "fallback {{node}}",
           "refId": "B"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
-      }
-    },
-    {
-      "title": "LLM 失败 / 重试 / 兜底 总计",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
-      "targets": [
-        {
-          "expr": "sum(rate(structured_output_attempt_total[1m])) by (node)",
-          "legendFormat": "attempt {{node}}",
-          "refId": "A"
-        },
-        {
-          "expr": "sum(rate(structured_output_retry_total[1m])) by (node)",
-          "legendFormat": "retry {{node}}",
-          "refId": "B"
-        },
-        {
-          "expr": "sum(rate(structured_output_failure_total[1m])) by (node)",
-          "legendFormat": "failure {{node}}",
-          "refId": "C"
-        },
-        {
-          "expr": "sum(rate(structured_output_fallback_triggered_total[1m])) by (node)",
-          "legendFormat": "fallback {{node}}",
-          "refId": "D"
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
         }
-      ]
+      }
     },
     {
       "title": "Diagnose 失败原因分布",
       "type": "piechart",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 12 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 18
+      },
       "targets": [
         {
           "expr": "sum by (reason_kind) (increase(diagnose_failure_reason_total[1h]))",
@@ -120,97 +237,143 @@
       ]
     },
     {
-      "title": "上下文 - 每次 LLM token 数 P95",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 18 },
+      "title": "其他节点失败分布(按节点)",
+      "type": "piechart",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 18
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(context_tokens_per_llm_call_bucket[5m])) by (node, le))",
-          "legendFormat": "P95 {{node}}",
+          "expr": "sum by (node) (increase(structured_output_failure_total{node!=\"diagnose\"}[1h]))",
+          "legendFormat": "{{node}}",
           "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": { "unit": "short" }
-      }
-    },
-    {
-      "title": "上下文 - 循环轮次分布",
-      "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 18 },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.5, sum(rate(context_loop_iterations_bucket[5m])) by (loop_type, le))",
-          "legendFormat": "P50 {{loop_type}}",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(context_loop_iterations_bucket[5m])) by (loop_type, le))",
-          "legendFormat": "P95 {{loop_type}}",
-          "refId": "B"
         }
       ]
     },
     {
-      "title": "依赖层 - PG 查询延迟 P95",
+      "title": "依赖层 - PG 查询延迟 近 2 分钟平均",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 8, "x": 0, "y": 24 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(db_query_latency_seconds_bucket[5m])) by (operation, le))",
-          "legendFormat": "P95 {{operation}}",
+          "expr": "sum(rate(db_query_latency_seconds_sum[2m])) by (operation) / sum(rate(db_query_latency_seconds_count[2m])) by (operation)",
+          "legendFormat": "{{operation}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     },
     {
-      "title": "依赖层 - Redis 命令延迟 P95",
+      "title": "依赖层 - Redis 命令延迟 近 2 分钟平均",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 8, "x": 8, "y": 24 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(redis_command_latency_seconds_bucket[5m])) by (command, le))",
-          "legendFormat": "P95 {{command}}",
+          "expr": "sum(rate(redis_command_latency_seconds_sum[2m])) by (command) / sum(rate(redis_command_latency_seconds_count[2m])) by (command)",
+          "legendFormat": "{{command}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     },
     {
-      "title": "依赖层 - Milvus RPC 延迟 P95",
+      "title": "依赖层 - Milvus RPC 延迟 近 2 分钟平均",
       "type": "timeseries",
-      "datasource": { "type": "prometheus", "uid": "Prometheus" },
-      "gridPos": { "h": 6, "w": 8, "x": 16, "y": 24 },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(milvus_rpc_latency_seconds_bucket[5m])) by (collection, operation, le))",
-          "legendFormat": "P95 {{collection}}/{{operation}}",
+          "expr": "sum(rate(milvus_rpc_latency_seconds_sum[2m])) by (collection, operation) / sum(rate(milvus_rpc_latency_seconds_count[2m])) by (collection, operation)",
+          "legendFormat": "{{collection}}/{{operation}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
-        "defaults": { "unit": "s" }
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineInterpolation": "linear",
+            "spanNulls": true,
+            "showPoints": "never",
+            "lineWidth": 1,
+            "fillOpacity": 0
+          }
+        }
       }
     }
   ],
   "refresh": "15s",
   "schemaVersion": 39,
   "style": "dark",
-  "tags": ["medical-rag", "app"],
-  "templating": { "list": [] },
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": [
+    "medical-rag",
+    "app"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
   "timezone": "",
   "title": "Medical RAG - 应用性能",
   "uid": "medical-rag-app",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

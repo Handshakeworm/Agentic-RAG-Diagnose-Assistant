@@ -11,6 +11,7 @@ schema 与索引参数集中在 config/milvus_schema.py。
 from __future__ import annotations
 
 import os
+import time
 
 from pymilvus import AnnSearchRequest, Collection, connections, utility
 
@@ -21,6 +22,7 @@ from config.milvus_schema import (
     DOCS_SCHEMA,
     DOCS_SPARSE_INDEX,
 )
+from src.common.metrics import milvus_rpc_latency_seconds
 
 
 def _ensure_connection(alias: str = "default") -> None:
@@ -95,14 +97,18 @@ def search_dense(
     # 64 作为下限保留小查询(top_k≤32)的原默认行为;大 top_k 时按 2× 扩展候选池
     # 兼顾召回质量(spec §3.2.2:RETRIEVE_TOP_N=200,这里 ef=400)。
     ef = max(64, top_k * 2)
-    raw = coll.search(
-        data=[query_vector],
-        anns_field="dense_vector",
-        param={"metric_type": "COSINE", "params": {"ef": ef}},
-        limit=top_k,
-        expr=expr,
-        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
-    )[0]
+    t0 = time.perf_counter()
+    try:
+        raw = coll.search(
+            data=[query_vector],
+            anns_field="dense_vector",
+            param={"metric_type": "COSINE", "params": {"ef": ef}},
+            limit=top_k,
+            expr=expr,
+            output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
+        )[0]
+    finally:
+        milvus_rpc_latency_seconds.labels(collection="docs", operation="search_dense").observe(time.perf_counter() - t0)
 
     return [
         {
@@ -135,14 +141,18 @@ def search_sparse_bm25(
 
     expr = f'source_id == "{source_id_filter}"' if source_id_filter else None
 
-    raw = coll.search(
-        data=[query_text],
-        anns_field="bm25_sparse",
-        param={"metric_type": "BM25", "params": {}},
-        limit=top_k,
-        expr=expr,
-        output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
-    )[0]
+    t0 = time.perf_counter()
+    try:
+        raw = coll.search(
+            data=[query_text],
+            anns_field="bm25_sparse",
+            param={"metric_type": "BM25", "params": {}},
+            limit=top_k,
+            expr=expr,
+            output_fields=["id", "source_chunk_id", "vector_type", "original_content", "source_id"],
+        )[0]
+    finally:
+        milvus_rpc_latency_seconds.labels(collection="docs", operation="search_sparse_bm25").observe(time.perf_counter() - t0)
 
     return [
         {

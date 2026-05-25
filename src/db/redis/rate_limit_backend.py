@@ -27,6 +27,7 @@ import time
 
 from redis.exceptions import RedisError
 
+from src.common.metrics import redis_command_latency_seconds
 from src.db.redis.cache import get_redis_client
 
 
@@ -88,6 +89,7 @@ class RedisSlidingWindow:
             # 首次执行 SCRIPT LOAD,后续 EVALSHA 节省带宽
             if self._script_sha is None:
                 self._script_sha = client.script_load(_SLIDING_WINDOW_LUA)
+            t0 = time.perf_counter()
             try:
                 result = client.evalsha(
                     self._script_sha, 1, bucket, now_micro, window_micro, limit
@@ -101,6 +103,10 @@ class RedisSlidingWindow:
                     )
                 else:
                     raise
+            finally:
+                redis_command_latency_seconds.labels(command="EVALSHA").observe(
+                    time.perf_counter() - t0
+                )
         except RedisError as e:
             _logger.warning("Redis 限流操作失败,走 fail-open:%s", e)
             return True, 0
