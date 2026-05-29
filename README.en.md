@@ -46,7 +46,7 @@
 | **Multi-gold average coverage** | **86.7%** | Multi-gold cases have 86.7% of gold diagnoses listed on average |
 | Multi-gold full recall rate | 72.6% | Multi-gold cases where ALL gold diagnoses are covered (45/62) |
 
-→ Detailed methodology, `match_type` distribution, key design decisions: see [Chinese README — Evaluation Results](README.md#评测结果) and [RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md) (Chinese, retrieval layer in 7 chapters)
+→ Detailed methodology, `match_type` distribution, key design decisions: see [Chinese README — Evaluation Results](README.md#评测结果) and [RETRIEVAL_EVAL.md](docs/RETRIEVAL_EVAL.md) (Chinese, retrieval layer in 7 chapters)
 
 ---
 
@@ -137,8 +137,8 @@ See [DEV_SPEC.md §8.4 progress table](DEV_SPEC.md#84-进度跟踪表). As of 20
 
 - [DEV_SPEC.md](DEV_SPEC.md) — full design specification (Chinese, 4976 lines, single source of truth)
 - [CLAUDE.md](CLAUDE.md) — AI collaboration workflow, architectural rules, contract red lines
-- [RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md) — RAG retrieval evaluation report (Chinese, 7 chapters)
-- [EL_DESIGN_REVIEW.md](EL_DESIGN_REVIEW.md) — Entity Linking design review (Chinese)
+- [RETRIEVAL_EVAL.md](docs/RETRIEVAL_EVAL.md) — RAG retrieval evaluation report (Chinese, 7 chapters)
+- [EL_DESIGN_REVIEW.md](docs/EL_DESIGN_REVIEW.md) — Entity Linking design review (Chinese)
 - [scripts/METHODOLOGY.md](scripts/METHODOLOGY.md) — Chunking POC general methodology
 
 ---

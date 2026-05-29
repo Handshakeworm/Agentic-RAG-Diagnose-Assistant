@@ -46,7 +46,7 @@
 | **多 gold 平均覆盖率** | **86.7%** | 多 gold case 平均 86.7% 的 gold 被 LLM 列出 |
 | 多 gold 全召回率 | 72.6% | 多 gold case 所有 gold 都被覆盖(45/62)|
 
-→ 详细方法学 / match_type 分布 / 关键设计决策见 [评测结果](#评测结果) · 全检索层细节见 [RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md)
+→ 详细方法学 / match_type 分布 / 关键设计决策见 [评测结果](#评测结果) · 全检索层细节见 [RETRIEVAL_EVAL.md](docs/RETRIEVAL_EVAL.md)
 
 ---
 
@@ -197,7 +197,7 @@ RTX 5070 Ti 16GB 同时承载 Embedding 8B(~8.5GB)+ Reranker 2.4B(~2.6GB),靠 **
 4. **L2 硬去重**:每轮 askable 注入 `asked_targets` 已问列表,LLM 不能换皮重出
 5. **追问硬上限**:`MAX_FOLLOWUP_ROUNDS=8` 兜底,触顶 → ⑩ Step -1 短路出 `insufficient`
 
-> 原"TF-IDF + 信息增益 + 可问性评估"4 步算法(原 `extract_symptoms` + 4 LLM)整体废弃 — 实测 TF-IDF 抽出 94% 是医学教材通用高频词,信息增益的可比 key 立不起来。改 LLM 1 次基于 state 直接选,利用 LLM 内化的医学鉴别诊断知识。详见 [EL_DESIGN_REVIEW §11](EL_DESIGN_REVIEW.md)。
+> 原"TF-IDF + 信息增益 + 可问性评估"4 步算法(原 `extract_symptoms` + 4 LLM)整体废弃 — 实测 TF-IDF 抽出 94% 是医学教材通用高频词,信息增益的可比 key 立不起来。改 LLM 1 次基于 state 直接选,利用 LLM 内化的医学鉴别诊断知识。详见 [EL_DESIGN_REVIEW §11](docs/EL_DESIGN_REVIEW.md)。
 
 ### 9. 1 步诊断推理 + 失败兜底
 
@@ -628,11 +628,15 @@ LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth
 
 - **评测数据**:`.eval/rag_eval/cases/*.json` — 62 case 执业医考题(`patient_text` + `diagnosis` gold)
 - **检索评测**:`.eval/rag_eval/{compare_rrf_weighting,run_llm_judge,compute_metrics}.py`
-- **诊断评测**:`.eval/rag_eval/{run_diagnose_eval,run_diagnose_judge}.py`
+- **诊断评测**:`.eval/rag_eval/{run_diagnose_eval,run_diagnose_judge}.py`(LLM Judge 评 gold ↔ LLM 候选临床等价性,6 档 match_type)
+- **RAGAS 4 指标评测**:`.eval/rag_eval/run_ragas_judge.py` — Faithfulness / Answer Relevancy / Context Precision / Context Recall,**对齐 ragas v0.2 原算法**(自实现 LLM Judge + 项目 Qwen3-Embedding-8B 算 cosine,不依赖 ragas 库;选型理由见下方"详细方法学")
 - **per-case 结果**:
   - 诊断结果 `.eval/rag_eval/diagnose_eval/*.json`(62 个 + gold + LLM candidates + prompt + raw)
-  - LLM Judge 评判 `.eval/rag_eval/diagnose_judge/*.json` + `diagnose_judge_summary.json`
-- **详细报告**:[RETRIEVAL_EVAL.md](RETRIEVAL_EVAL.md)(检索层 7 章详述含 Reranker 全 K 对照、双粒度指标方法学)
+  - 诊断 LLM Judge `.eval/rag_eval/diagnose_judge/*.json` + `diagnose_judge_summary.json`
+  - RAGAS LLM Judge `.eval/rag_eval/ragas_judge/*.json` + `ragas_summary.json`
+- **详细方法学**:
+  - 检索层 — [RETRIEVAL_EVAL.md](docs/RETRIEVAL_EVAL.md)(7 章,含 Reranker 全 K 对照、双粒度指标)
+  - 诊断层 + RAGAS — [EVALUATION_METHODOLOGY.md](docs/EVALUATION_METHODOLOGY.md)(诊断 Judge 评判标准 6 档 + RAGAS 4 指标算法详解 + 跟 ragas 库的对齐说明 + 简化 / 等价点逐条标注)
 
 ### 5. 真实 case 示例 — 完整 LLM 诊断输出
 
@@ -765,6 +769,9 @@ LLM 给出的 4 个候选(按概率降序):
   - [§6 评估](DEV_SPEC.md#6-评估)(RAG 离线 / Agent 离线 / LLM Judge / 在线)
   - [§9 全局实现契约](DEV_SPEC.md#9-全局实现契约跨章节) — **跨章节工程契约**(LLM 调用模板 / Pydantic schema / 运行时常量 / 审计字段)
 - [CLAUDE.md](CLAUDE.md) — AI 协作工作流、架构规约、契约红线
+- [RETRIEVAL_EVAL.md](docs/RETRIEVAL_EVAL.md) — RAG 检索层评测报告(7 章:sparse 字段、RRF 加权、LLM Judge、双粒度指标、Reranker 全 K 对照)
+- [EVALUATION_METHODOLOGY.md](docs/EVALUATION_METHODOLOGY.md) — 诊断层 + RAGAS 4 指标评测方法学(LLM Judge 6 档评判 / RAGAS 对齐细节 / ragas 库选型理由)
+- [MANUAL_TEST_CASE.md](docs/MANUAL_TEST_CASE.md) — UI 手工测试用例集
 - [scripts/METHODOLOGY.md](scripts/METHODOLOGY.md) — Chunking POC 通用方法论
 
 ---

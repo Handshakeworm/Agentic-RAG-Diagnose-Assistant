@@ -79,7 +79,7 @@ case 007 实测:5 条 impressions 4 条触发过滤,**信息不丢**(被过滤�
 - case 062 麻疹(复杂报告):28 条
 - **62 case 平均 21.8 条 sparse**
 
-代码:[`.eval/rag_eval/step1.py`](.eval/rag_eval/step1.py)
+代码:[`.eval/rag_eval/step1.py`](../.eval/rag_eval/step1.py)
 
 ---
 
@@ -118,8 +118,8 @@ case 007 实测:5 条 impressions 4 条触发过滤,**信息不丢**(被过滤�
 3. **Sparse BM25 对表格弱** — `<table><tr><td>` HTML 标签 + 数字噪音,BM25 命中精度低,但 RRF 由 dense 兜底
 4. **Q2 召回的 table 中数值密集占 9.6%**,vs 全库 13.2%,**轻微偏低但召回结构基本均匀**
 
-代码:[`.eval/rag_eval/validate_table_recall.py`](.eval/rag_eval/validate_table_recall.py)
-数据:[`.eval/rag_eval/table_recall_validation/`](.eval/rag_eval/table_recall_validation/)
+代码:[`.eval/rag_eval/validate_table_recall.py`](../.eval/rag_eval/validate_table_recall.py)
+数据:[`.eval/rag_eval/table_recall_validation/`](../.eval/rag_eval/table_recall_validation/)
 
 ---
 
@@ -162,8 +162,8 @@ Spec §3.2.2 / §4.1.2 写 "等权融合,无需手动权重"。当前改造**突
 
 实施时:不动 `src/rag/retrieval/fusion.py`(影响生产),评测脚本本地实现加权 RRF,后续可决定是否正式 patch spec + fusion。
 
-代码:[`.eval/rag_eval/compare_rrf_weighting.py`](.eval/rag_eval/compare_rrf_weighting.py)
-数据:[`.eval/rag_eval/sparse_fusion_compare/compare_result.json`](.eval/rag_eval/sparse_fusion_compare/compare_result.json)(63.9 MB,含全量 dense + sparse hits + 双 fusion Top-200 + chunks_meta)
+代码:[`.eval/rag_eval/compare_rrf_weighting.py`](../.eval/rag_eval/compare_rrf_weighting.py)
+数据:[`.eval/rag_eval/sparse_fusion_compare/compare_result.json`](../.eval/rag_eval/sparse_fusion_compare/compare_result.json)(63.9 MB,含全量 dense + sparse hits + 双 fusion Top-200 + chunks_meta)
 
 ---
 
@@ -213,8 +213,8 @@ Spec §3.2.2 / §4.1.2 写 "等权融合,无需手动权重"。当前改造**突
 
 全量跑时间:**~8 分钟**(并发前预估 75 min),成本 ~$3-7。
 
-代码:[`.eval/rag_eval/run_llm_judge.py`](.eval/rag_eval/run_llm_judge.py)
-数据:[`.eval/rag_eval/sparse_fusion_compare/judge_per_case/`](.eval/rag_eval/sparse_fusion_compare/judge_per_case/)(62 个 case json + `_meta.json` + `_parents_meta.json` 9.5 MB)
+代码:[`.eval/rag_eval/run_llm_judge.py`](../.eval/rag_eval/run_llm_judge.py)
+数据:[`.eval/rag_eval/sparse_fusion_compare/judge_per_case/`](../.eval/rag_eval/sparse_fusion_compare/judge_per_case/)(62 个 case json + `_meta.json` + `_parents_meta.json` 9.5 MB)
 
 ---
 
@@ -267,8 +267,8 @@ Spec §3.2.2 / §4.1.2 写 "等权融合,无需手动权重"。当前改造**突
 - **chunk-level 数值高于 parent-level** — 高分 parent 的多 child 在 chunk-level 重复占位虚高,**parent-level 更代表真实业务价值**
 - **ρ=0.71 高度对齐 LLM 判断** — RRF 加权方案已经很接近"理想排序",改进空间有限
 
-代码:[`.eval/rag_eval/compute_metrics.py`](.eval/rag_eval/compute_metrics.py)
-数据:[`.eval/rag_eval/sparse_fusion_compare/metrics_result.json`](.eval/rag_eval/sparse_fusion_compare/metrics_result.json)(154 KB)
+代码:[`.eval/rag_eval/compute_metrics.py`](../.eval/rag_eval/compute_metrics.py)
+数据:[`.eval/rag_eval/sparse_fusion_compare/metrics_result.json`](../.eval/rag_eval/sparse_fusion_compare/metrics_result.json)(154 KB)
 
 ---
 
@@ -337,8 +337,8 @@ RERANKER_ENABLED=False
 
 当前只评检索质量,**Reranker 真正命运取决于 ⑩ diagnose 节点能否在 RRF 加权 Top-20 上稳定输出正确诊断** — 见 §9 "下游 ⑩ diagnose 准确率验证"。如果下游表现已经达标,关 Reranker 没争议;如果下游受 ordering 影响大,Reranker 可能仍有空间。
 
-代码:[`.eval/rag_eval/compare_rerank_full.py`](.eval/rag_eval/compare_rerank_full.py)
-数据:[`.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json`](.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json)(334 KB)
+代码:[`.eval/rag_eval/compare_rerank_full.py`](../.eval/rag_eval/compare_rerank_full.py)
+数据:[`.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json`](../.eval/rag_eval/sparse_fusion_compare/rerank_full_result.json)(334 KB)
 
 ---
 

@@ -11,7 +11,7 @@
 ## 1. 现状速览
 
 EL = Entity Linking,把"病人/教材里的症状词"归一化到 ICD-10 标准 concept。
-当前实现([src/agent/nodes/build_query.py:_link_one_entity](src/agent/nodes/build_query.py))三层归一化:
+当前实现([src/agent/nodes/build_query.py:_link_one_entity](../src/agent/nodes/build_query.py))三层归一化:
 
 ```
 Tier 1  query_term_by_alias_exact()       精确别名匹配,confidence=1.0
@@ -113,7 +113,7 @@ LLM 训练数据本身就有"腹痛=肚子疼=胃痛=abdominal pain"这种知识
 ### ⑤ API 输出 / 审计
 
 **现路径**(澄清):`standardized_entities` **不在对外 API 返回里**,只写入内部审计表 `rag_trace.intent_result` JSONB 字段。
-对外 `DiagnoseResponse`([src/api/schemas/diagnosis_schema.py:48-74](src/api/schemas/diagnosis_schema.py#L48-L74))只返回 session_id / status / pending_question / recommended_tests / final_response / diagnosis_result / medication_advice / risk_warnings。
+对外 `DiagnoseResponse`([src/api/schemas/diagnosis_schema.py:48-74](../src/api/schemas/diagnosis_schema.py#L48-L74))只返回 session_id / status / pending_question / recommended_tests / final_response / diagnosis_result / medication_advice / risk_warnings。
 
 **砍 EL 的实际影响**:
 - ✓ 前端 API 0 影响(对外 schema 本来不包含)
@@ -126,16 +126,16 @@ LLM 训练数据本身就有"腹痛=肚子疼=胃痛=abdominal pain"这种知识
 
 | 文件 | 砍 EL 后操作 | 评估 |
 |---|---|---|
-| [src/agent/nodes/build_query.py](src/agent/nodes/build_query.py) | 砍 `_link_one_entity` / `_link_entities` 函数,Step 2 整段删 | ~80 行 |
-| [src/agent/nodes/extract_symptoms.py](src/agent/nodes/extract_symptoms.py) | 砍 `_normalize_keyword`,改成 LLM 抽取 + 同义词聚合 | ~50 行重写 |
-| [src/agent/nodes/select_symptom.py](src/agent/nodes/select_symptom.py) | `_filter_already_asked` / `_consume_report_evidence` 改 LLM | ~40 行重写 |
-| [src/rag/retrieval/query_processing.py](src/rag/retrieval/query_processing.py) | 整个文件可以删(只服务 sparse 词袋扩展) | -67 行 |
-| [src/db/milvus/terms_collection.py](src/db/milvus/terms_collection.py) | 整个文件可以删 | -180 行 |
-| [config/milvus_schema.py](config/milvus_schema.py) | 删 terms_collection schema 段 | -30 行 |
-| [terms/](terms/) 目录 | 整个删(D2 任务建表脚本) | -数百行 |
-| [src/agent/state.py](src/agent/state.py) | `standardized_entities` 字段保留还是删?(取决于 ⑤) | 边界 |
-| [src/agent/schemas/entity_linking.py](src/agent/schemas/entity_linking.py) | 整个文件可以删 | -1 个文件 |
-| [src/agent/schemas/info_collect.py](src/agent/schemas/info_collect.py) | 不动(PresentIllnessSlots 跟 EL 无关) | 0 |
+| [src/agent/nodes/build_query.py](../src/agent/nodes/build_query.py) | 砍 `_link_one_entity` / `_link_entities` 函数,Step 2 整段删 | ~80 行 |
+| [src/agent/nodes/extract_symptoms.py](../src/agent/nodes/extract_symptoms.py) | 砍 `_normalize_keyword`,改成 LLM 抽取 + 同义词聚合 | ~50 行重写 |
+| [src/agent/nodes/select_symptom.py](../src/agent/nodes/select_symptom.py) | `_filter_already_asked` / `_consume_report_evidence` 改 LLM | ~40 行重写 |
+| [src/rag/retrieval/query_processing.py](../src/rag/retrieval/query_processing.py) | 整个文件可以删(只服务 sparse 词袋扩展) | -67 行 |
+| [src/db/milvus/terms_collection.py](../src/db/milvus/terms_collection.py) | 整个文件可以删 | -180 行 |
+| [config/milvus_schema.py](../config/milvus_schema.py) | 删 terms_collection schema 段 | -30 行 |
+| [terms/](../terms/) 目录 | 整个删(D2 任务建表脚本) | -数百行 |
+| [src/agent/state.py](../src/agent/state.py) | `standardized_entities` 字段保留还是删?(取决于 ⑤) | 边界 |
+| [src/agent/schemas/entity_linking.py](../src/agent/schemas/entity_linking.py) | 整个文件可以删 | -1 个文件 |
+| [src/agent/schemas/info_collect.py](../src/agent/schemas/info_collect.py) | 不动(PresentIllnessSlots 跟 EL 无关) | 0 |
 | DEV_SPEC §9.5 | 删 `EntityLinkingMatch` schema 条目 | spec 改 |
 | DEV_SPEC §9.7 | 删 `ENTITY_LINKING_TIER2_THRESHOLD` 常量 | spec 改 |
 | .env / config/settings.py | 删 `AGENT_ENTITY_LINKING_TIER2_THRESHOLD` | 配置改 |
@@ -205,9 +205,9 @@ LLM 训练数据本身就有"腹痛=肚子疼=胃痛=abdominal pain"这种知识
 
 **触发**:用户提出"先抽几个 chunk 验证 TF-IDF + EL 实际效果如何,如果本来就是错误的设计,就不用纠结要不要删 EL 了"。
 
-**验证脚本**:[.eval/rag_eval/validate_node4_tfidf_el.py](.eval/rag_eval/validate_node4_tfidf_el.py)
+**验证脚本**:[.eval/rag_eval/validate_node4_tfidf_el.py](../.eval/rag_eval/validate_node4_tfidf_el.py)
 - 从内科学 source `37ed0fa69150a841` 确定性 hash 抽样 50 个 child chunk
-- 跑 [src/agent/nodes/extract_symptoms.py](src/agent/nodes/extract_symptoms.py) 同款逻辑:`TfidfVectorizer(analyzer="char_wb", ngram_range=(2,4))` 单 chunk 取 Top-30,再走 EL 三层(Tier 1 alias / Tier 2 vector ≥0.92 / Tier 3 占位)
+- 跑 [src/agent/nodes/extract_symptoms.py](../src/agent/nodes/extract_symptoms.py) 同款逻辑:`TfidfVectorizer(analyzer="char_wb", ngram_range=(2,4))` 单 chunk 取 Top-30,再走 EL 三层(Tier 1 alias / Tier 2 vector ≥0.92 / Tier 3 占位)
 - 统计:关键词性质、EL Tier 分布、能形成的"症状 key → chunk 集合"倒排表(③ 信息增益要的可比 key 实际成型情况)
 
 ### 11.1 共池 TF-IDF Top-30 关键词(50 chunk 一起算)
