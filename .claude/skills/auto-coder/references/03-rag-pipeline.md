@@ -32,7 +32,7 @@
 
 #### 多类型内容处理策略
 
-项目数据源含大量多类型内容(表格、流程图、统计图、影像图、化学结构、公式)。**2026-05-03 拍板**:只保留 **table / figure** 两类做 chunk(figure 涵盖 mineru type=image 中 sub_type=flowchart 的子集 + type=chart 全部;后者识别质量差,统一按图片处理),其他全部在 chunking 阶段内存过滤丢弃(详细决策依据见 `非项目本体/图表等处理方式.md`)。
+项目数据源含大量多类型内容(表格、流程图、统计图、影像图、化学结构、公式)。**2026-05-03 拍板**:只保留 **table / figure** 两类做 chunk(figure 涵盖 mineru type=image 中 sub_type=flowchart 的子集 + type=chart 全部;后者识别质量差,统一按图片处理),其他全部在 chunking 阶段内存过滤丢弃。
 
 **单行多列设计(2026-05-12 修订自原"源 chunk + summary chunk"双行架构)**
 
