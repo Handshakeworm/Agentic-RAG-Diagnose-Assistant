@@ -364,7 +364,7 @@ Agentic-RAG-diagnose-Assistant/
 - Vector storage: Milvus (Dense + Sparse vectors, containerized deployment, composed of three containers: `milvus-standalone` + `milvus-etcd` + `milvus-minio`) (`src/db/milvus/`)
 - Metadata storage: PostgreSQL (Chunk metadata, source documents, medical terminology, etc.) (`src/db/postgres/`)
 - Raw document storage: PostgreSQL `raw_documents` table (raw documents after MinerU parsing, in the same database as `sources`) (`src/db/postgres/`)
-- Cache: Redis (FAQ, hot queries, etc.) (`src/db/redis/`)
+- Cache: Redis (config cache only — system_config, 60s TTL; no RAG response caching, see §5.1) (`src/db/redis/`)
 
 **Logging and monitoring layer**
 
@@ -419,8 +419,8 @@ graph TB
             etcd["etcd<br/><i>metadata</i>"]
             minio["minio :9000<br/><i>object storage</i>"]
         end
-        postgres["postgres<br/><i>metadata · Chunk/terminology/patient · raw documents (MinerU output)</i>"]
-        redis["redis<br/><i>cache · FAQ/hot queries</i>"]
+        postgres["postgres<br/><i>20 tables · Chunk/terminology/patient · raw documents (MinerU output) · audit</i>"]
+        redis["redis<br/><i>cache · system_config only / 60s TTL</i>"]
     end
 
     api -->|"HTTPS"| cloudapi
@@ -455,7 +455,7 @@ graph TB
     style monrow2 fill:transparent,stroke:none
 ```
 
-Container list (14 total):
+Container list (13 total):
 - **Main path**: nginx → api (LLM inference is invoked via the DashScope cloud API, occupies no local container)
 - **Data layer**: milvus-standalone, milvus-etcd, milvus-minio, postgres, redis
 - **Monitoring layer**: prometheus, grafana, loki, promtail, node-exporter, dcgm-exporter

@@ -1,6 +1,11 @@
 .venv/
 mineru_output/
 非项目本体/
+面试准备/
+
+# docs 下的个人学习笔记(非项目本体,不进 git)
+docs/DATABASE_LEARNING_ROADMAP.md
+docs/sql-postgres/
 
 # 本地环境与密钥（务必勿提交，含 LLM API Key、JWT Secret 等）
 .env

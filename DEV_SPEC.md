@@ -345,7 +345,7 @@ Agentic-RAG-diagnose-Assistant/
 - 向量存储：Milvus（Dense + Sparse 向量，容器化部署，由 `milvus-standalone` + `milvus-etcd` + `milvus-minio` 三个容器组成）（`src/db/milvus/`）
 - 元数据存储：PostgreSQL（Chunk 元数据、来源文档、医学术语等）（`src/db/postgres/`）
 - 原始文档存储：PostgreSQL `raw_documents` 表（MinerU 解析后的原始文档，与 `sources` 同库）（`src/db/postgres/`）
-- 缓存：Redis（FAQ、热点查询等）（`src/db/redis/`）
+- 缓存：Redis（仅缓存配置 system_config，60s TTL；不做 RAG 响应缓存，见 §5.1）（`src/db/redis/`）
 
 **日志与监控层**
 
@@ -400,8 +400,8 @@ graph TB
             etcd["etcd<br/><i>元数据</i>"]
             minio["minio :9000<br/><i>对象存储</i>"]
         end
-        postgres["postgres<br/><i>元数据 · Chunk/术语/患者 · 原始文档(MinerU 产物)</i>"]
-        redis["redis<br/><i>缓存 · FAQ/热点查询</i>"]
+        postgres["postgres<br/><i>20 表 · Chunk/术语/患者 · 原始文档(MinerU 产物) · 审计</i>"]
+        redis["redis<br/><i>缓存 · 仅 system_config / 60s TTL</i>"]
     end
 
     api -->|"HTTPS"| cloudapi
@@ -436,7 +436,7 @@ graph TB
     style 监控行2 fill:transparent,stroke:none
 ```
 
-容器清单（共 14 个）：
+容器清单（共 13 个）：
 - **主链路**：nginx → api（LLM 推理通过 DashScope 云端 API 调用，不占本地容器）
 - **数据层**：milvus-standalone、milvus-etcd、milvus-minio、postgres、redis
 - **监控层**：prometheus、grafana、loki、promtail、node-exporter、dcgm-exporter
