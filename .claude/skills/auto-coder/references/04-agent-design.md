@@ -461,6 +461,7 @@ result = graph.invoke(initial_state, config=config)
   - **unaskable 两段精筛**:④ 出粗筛(LLM 撒网式列出"想查的"),⑩ Step 3 基于诊断结果精筛(confirmed/insufficient 通常清空、need_exam 留关键鉴别项);代码侧不做语义判断,全交给两次 LLM 分工
   - **不再调 reranked chunks / candidate_chunks**:LLM 凭 state 字段足够形成 prior 选追问 + 粗筛 unaskable;减少 prompt 长度
   - **每轮 1 次 LLM 调用**:延迟 ~3-5s,前半段交互可接受;比原 ④ 的 4 处 LLM 调用总延迟更低
+  - **【Deferred】chunk-informed 选题(待评测验证再做)**:上条"不再调 candidate_chunks"是当前取舍——④ 跑在 ③ retrieve 正后面,`candidate_chunks` 已在 state,但 ④ 没读,选的是"HPI 哪维空缺"而非"top 鉴别诊断靠哪个症状区分"。升级路径:取 RRF 序 **top-5~8 的 distinct 父块全文**(复用 ⑩ Step 0.5 的子→父扩展 + 父块去重,`lookup_chunk_content` 回查;复用 ④ 现有 `deepseek-v4-pro` 调用,**无新 LLM 调用站点**)注入 prompt,使选题转为鉴别驱动;无需新节点、不碰 follow-up 硬上限。**为什么读原文不读 summary**:鉴别特征是颗粒度的(如"进食油腻后加重 / Murphy 征"),summary 为召回设计会把它抽象掉,够选候选疾病但不够选区分症状;且让 ④ 接地在文献(而非 LLM 参数记忆)与 ⑩ 防幻觉路线一致。**为什么 K 砍到 5~8 而非对齐 ⑩ 的 20**:原文信息密度高,头部几个 distinct 父块已覆盖主要候选 + 鉴别点;且 ④ 在追问循环里每轮都跑,喂全文 ×20× 每轮 ≈ 重复烧诊断级 payload,故少而全。**前置门槛**:现有单一主诊断评测集结构上测不出此增量(没有"两病靠一个症状区分"的 case),须先建"鉴别模糊"评测子集证明 ④ 填槽式确有漏题,再动;具体 K(5 还是 8)实测再定。约束:若持久化注入的文献上下文,新字段须按 §9.2 带默认值 + 鉴别循环每轮刷新(避免拿上一轮旧文献选题);取数口径与 ⑩ 一致用 RRF 序 top-K(reranker 默认关),并复用父块去重。
 
 ##### ⑤+⑥ `generate_followup` + `wait_followup_answer` — 检索前 holistic gate + 等待回答
 
@@ -573,6 +574,7 @@ result = graph.invoke(initial_state, config=config)
   - 按 Top-K 小块的 `parent_chunk_id` 批量查询 PostgreSQL，取父块全文
   - `parent_chunk_id IS NULL` 时保留小块原文兜底
   - 父块全文仅替换当次 prompt 中的小块文本，**不写回 State**；`candidate_chunks` 始终存储小块
+  - **【Planned,见 `pending tasks.md` #1】**:当前父块文本按子块下标逐条装入,**未按 `parent_chunk_id` 去重**(top-K 子块撞父时同一父块全文重复喂 LLM,违 §3.2.3「按 chunk_id 去重」本意)。计划把截断从子块层挪到**父块层**——遍历子块边扩父块边去重,凑满 `DIAGNOSE_PARENT_TOP_K=20` 个 distinct 父块即停;改后须重跑 diagnose eval 确认 top1 不回退
   - 表/图直接命中(规则 2)+ 父块 heading_path_id 同节图表(规则 3,封顶 RETRIEVE_PARENT_FIGURE_CAP)合并去重后,figure 的 image_path 转 base64 作为多模态 image_url 块附在 LLM messages 上
 
   **Step 1: 1 步 LLM 诊断推理(原生多模态模型,DashScope qwen3.5-plus)**

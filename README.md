@@ -387,14 +387,14 @@ flowchart TD
     RD --> CK[Chunking<br/>目录权威清单 + 三遍切<br/>+ size 驱动子块]
 
     CK -->|child + parent| EN1[Enrichment<br/>title + summary + 3 questions<br/>DeepSeek 结构化输出]
-    CK -->|table| EN2[Enrichment<br/>medical_statement + 4 字段<br/>DeepSeek 看 html]
-    CK -->|figure / chart / flowchart| EN3[Enrichment<br/>medical_statement + 4 字段<br/>DashScope 看截图]
+    CK -->|table| EN2[Enrichment<br/>medical_statement + title + summary + 3 questions<br/>DeepSeek 看 html]
+    CK -->|figure / chart| EN3[Enrichment<br/>medical_statement + title + summary + 3 questions<br/>DashScope 看截图]
 
     EN1 --> CH[(chunks 表<br/>26054 行)]
     EN2 --> CH
     EN3 --> CH
 
-    CH -->|child| EM[Embedding<br/>Qwen3-8B INT8 batch=8]
+    CH -->|child + table + figure| EM[Embedding<br/>Qwen3-8B INT8 batch=8]
     CH -.parent skip.-> CH
     EM -->|1 original<br/>1 summary<br/>3 question| MV[(Milvus docs_collection<br/>129810 entities)]
 
@@ -415,48 +415,50 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S1["<b>Step 1: PostgreSQL Upsert（事务）</b><br/>- Upsert chunks 表（chunk_id 为主键）<br/>- 父块：embedding_status = 'skip'<br/>- 子块：embedding_status = 'pending'<br/>- 事务提交"]
+    S1["<b>Step 1: PG Upsert(事务)</b><br/>父块 → embedding_status='skip'<br/>子块 → 'pending'"]
     S1 -->|成功| BRANCH
-    S1 -->|"失败 → 整批回滚，不进入 Step 2，<br/>下次重试整批重处理"| END1["终止（等待重试）"]
+    S1 -->|"失败 → 整批回滚重试"| END1["终止(等待重试)"]
 
-    BRANCH{"父块？<br/>(embedding_status = 'skip')"}
-    BRANCH -->|是| END2["终止（无需向量化）"]
-    BRANCH -->|否（子块）| S2
+    BRANCH{"父块?"}
+    BRANCH -->|是| END2["终止(无需向量化)"]
+    BRANCH -->|否| S2
 
-    S2["<b>Step 2: Milvus Upsert（批量）</b><br/>- 以 chunk_id 确定性派生向量记录 ID：<br/>&ensp;{chunk_id} (original) / {chunk_id}_summary /<br/>&ensp;{chunk_id}_q0 / {chunk_id}_q1 / ...<br/>- 派生规则与字段定义见 config/milvus_schema.py:119 + src/rag/ingestion/embedding.py:112<br/>- 批量 Upsert 到 docs_collection"]
+    S2["<b>Step 2: Milvus Upsert(批量)</b><br/>chunk_id 派生 id / id_summary / id_qN(幂等覆盖)"]
     S2 -->|成功| S3
     S2 -->|失败| S2a
 
-    S2a["<b>Step 2a: Milvus 写入失败处理</b><br/>- PostgreSQL 中对应 chunk 的 embedding_status 更新为 'failed'<br/>- 记录错误日志（chunk_id + 异常信息）<br/>- 不回滚 PostgreSQL 数据（元数据本身是正确的）<br/>- 由补偿任务定期重试（见下方「补偿机制」）"]
+    S2a["<b>Step 2a: 失败处理</b><br/>chunk 标 'failed' · 不回滚 PG<br/>补偿任务定期重试"]
 
-    S3["<b>Step 3: 确认写入</b><br/>- Milvus Upsert 成功后，更新 PostgreSQL：<br/>&ensp;embedding_status = 'done', updated_at = now()"]
+    S3["<b>Step 3: 确认</b><br/>标 'done' + updated_at"]
 ```
 
 ### 检索(Retrieval)
 
 ```mermaid
 flowchart TD
-    Q[用户 query] --> BQ[② build_query<br/>NER + Sparse 多字段直采]
-    BQ -->|dense_query| DE[Dense Route<br/>Qwen Embedding<br/>1 次 ANN]
-    BQ -->|sparse_queries N 维| SP[Sparse Route<br/>N 次 BM25]
+    Q[MedicalState<br/>多轮问诊累积] --> BQ[② build_query<br/>Sparse 直采 + LLM Dense 改写]
+    BQ -->|dense_query| DE[Dense Route<br/>Qwen Embedding · 1 ANN]
+    BQ -->|sparse_queries N 路| SP[Sparse Route<br/>动态 N 路 BM25]
 
-    DE --> RRF[单阶段多路 RRF<br/>k=60 等权]
+    DE --> RRF[单阶段多路 RRF<br/>k=60 · dense 动态加权]
     SP --> RRF
 
-    RRF --> AGG[多向量聚合<br/>by source_chunk_id<br/>同 chunk 跨向量得分求和]
-    AGG --> TOP[Top-N 截断<br/>RETRIEVE_TOP_N=200]
-    TOP --> EXT[④ 智能追问选择<br/>1 LLM 出 questions + unaskable 粗筛]
+    RRF --> AGG[多向量聚合<br/>by source_chunk_id 求和]
+    AGG --> TOP[RRF 候选池截断<br/>RETRIEVE_TOP_N=200]
+    TOP --> EXT[④ 智能追问选择<br/>看 state 选维度]
     EXT -.多轮追问.-> BQ
 
-    TOP --> RR[⑩ Step 0 Reranker<br/>BGE-MiniCPM layerwise<br/>失败 → 原序 fallback]
-    RR --> EXP[Context 扩展<br/>子→父 + 同节图表]
-    EXP --> DG[⑩ 1 步 LLM 诊断<br/>原生多模态]
+    TOP --> RR[⑩ Step 0 精排截断<br/>RERANK_TOP_K=20]
+    RR --> EXP[⑩ Step 0.5 子块 → 父块全文<br/>+ 同节图表]
+    EXP --> DG[⑩ 1 步 LLM 诊断<br/>读父块全文]
 
     classDef gpu fill:#dcfce7,stroke:#16a34a,color:#1a1a1a
     classDef key fill:#fef3c7,stroke:#d97706,color:#1a1a1a
     class DE,RR gpu
     class RRF,AGG,RR key
 ```
+
+> **注**:Sparse 路数 `N` 动态 = 主诉 + 现病史 9 维(列表维按值拆)+ 报告所见,去重;RRF 中 dense 权重 = `max(1, N/5)`,抵消多路 sparse 对单路 dense 的挤兑;Step 0 取 RRF 序 top-20 喂诊断,Reranker 作可选精排层(评测验证 RRF 原序在 K=20 已达标,超时亦回退原序)。
 
 ---
 
@@ -622,7 +624,7 @@ LLM Judge(DeepSeek)对 RRF 加权 Top-50 parents 评 0~3 分,得到 ground truth
 | **Reranker 默认关闭** | K=20 下 BGE Reranker 全主指标无优势(NDCG -0.076 / Hit -1.6pp / MRR -0.065),省 2.6GB GPU + 5s 延迟 |
 | **RRF 动态加权** `dense_weight = max(1, N_sparse/5)` | 等权下 dense 单路被 sparse 多路挤兑,加权后 Top-20 内 dense exclusive chunks 保留量 ×6.5 |
 | **Sparse 多字段直采** | state 字段拼接(chief + 12 维 slots + report findings)→ N 路独立 BM25;实测 N=12~30(均 21.8),信号比单 query 拼接更全 |
-| **20 unique parents 喂 LLM**(对齐 LLM Judge 口径) | parent 不参与 embedding,需从 Top-200 chunks 顺序去重 |
+| **Top-20 父块全文喂 LLM**(对齐 LLM Judge parent 口径) | 检索/精排在子块级,喂诊断前 Small-to-Big 扩父块全文;parent 不参与 embedding。**即将改进**:截断下沉到父块层去重,确保喂满 20 个 unique 父块 |
 
 ### 4. 评测方法 + 数据 + 脚本
 

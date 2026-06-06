@@ -224,14 +224,14 @@ flowchart TD
     RD --> CK[Chunking<br/>authoritative TOC list + three-pass split<br/>+ size-driven child chunks]
 
     CK -->|child + parent| EN1[Enrichment<br/>title + summary + 3 questions<br/>DeepSeek structured output]
-    CK -->|table| EN2[Enrichment<br/>medical_statement + 4 fields<br/>DeepSeek reads html]
-    CK -->|figure / chart / flowchart| EN3[Enrichment<br/>medical_statement + 4 fields<br/>DashScope reads screenshot]
+    CK -->|table| EN2[Enrichment<br/>medical_statement + title + summary + 3 questions<br/>DeepSeek reads html]
+    CK -->|figure / chart| EN3[Enrichment<br/>medical_statement + title + summary + 3 questions<br/>DashScope reads screenshot]
 
     EN1 --> CH[(chunks table<br/>26054 rows)]
     EN2 --> CH
     EN3 --> CH
 
-    CH -->|child| EM[Embedding<br/>Qwen3-8B INT8 batch=8]
+    CH -->|child + table + figure| EM[Embedding<br/>Qwen3-8B INT8 batch=8]
     CH -.parent skip.-> CH
     EM -->|1 original<br/>1 summary<br/>3 question| MV[(Milvus docs_collection<br/>129810 entities)]
 
@@ -252,48 +252,50 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    S1["<b>Step 1: PostgreSQL Upsert (transaction)</b><br/>- Upsert the chunks table (chunk_id as primary key)<br/>- parent chunk: embedding_status = 'skip'<br/>- child chunk: embedding_status = 'pending'<br/>- transaction commit"]
+    S1["<b>Step 1: PG Upsert (transaction)</b><br/>parent chunk → embedding_status='skip'<br/>child chunk → 'pending'"]
     S1 -->|success| BRANCH
-    S1 -->|"failure → roll back the whole batch, do not enter Step 2,<br/>reprocess the whole batch on the next retry"| END1["terminate (await retry)"]
+    S1 -->|"failure → roll back whole batch, retry"| END1["terminate (await retry)"]
 
-    BRANCH{"parent chunk?<br/>(embedding_status = 'skip')"}
-    BRANCH -->|yes| END2["terminate (no vectorization needed)"]
-    BRANCH -->|no (child chunk)| S2
+    BRANCH{"parent chunk?"}
+    BRANCH -->|yes| END2["terminate (no vectorization)"]
+    BRANCH -->|no| S2
 
-    S2["<b>Step 2: Milvus Upsert (batch)</b><br/>- deterministically derive vector record IDs from chunk_id:<br/>&ensp;{chunk_id} (original) / {chunk_id}_summary /<br/>&ensp;{chunk_id}_q0 / {chunk_id}_q1 / ...<br/>- for derivation rules and field definitions see config/milvus_schema.py:119 + src/rag/ingestion/embedding.py:112<br/>- batch Upsert into docs_collection"]
+    S2["<b>Step 2: Milvus Upsert (batch)</b><br/>derive id / id_summary / id_qN from chunk_id (idempotent)"]
     S2 -->|success| S3
     S2 -->|failure| S2a
 
-    S2a["<b>Step 2a: Milvus write-failure handling</b><br/>- update the corresponding chunk's embedding_status in PostgreSQL to 'failed'<br/>- log the error (chunk_id + exception info)<br/>- do not roll back the PostgreSQL data (the metadata itself is correct)<br/>- retried periodically by the compensation task (see 'Compensation Mechanism' below)"]
+    S2a["<b>Step 2a: failure handling</b><br/>mark chunk 'failed' · no PG rollback<br/>compensation task retries"]
 
-    S3["<b>Step 3: confirm the write</b><br/>- after a successful Milvus Upsert, update PostgreSQL:<br/>&ensp;embedding_status = 'done', updated_at = now()"]
+    S3["<b>Step 3: confirm</b><br/>mark 'done' + updated_at"]
 ```
 
 ### Retrieval
 
 ```mermaid
 flowchart TD
-    Q[user query] --> BQ[② build_query<br/>NER + Sparse multi-field direct extraction]
-    BQ -->|dense_query| DE[Dense Route<br/>Qwen Embedding<br/>1 ANN]
-    BQ -->|sparse_queries N dims| SP[Sparse Route<br/>N BM25]
+    Q[MedicalState<br/>accumulated over multi-turn intake] --> BQ[② build_query<br/>sparse direct extraction + LLM dense rewrite]
+    BQ -->|dense_query| DE[Dense Route<br/>Qwen Embedding · 1 ANN]
+    BQ -->|sparse_queries N routes| SP[Sparse Route<br/>dynamic N-route BM25]
 
-    DE --> RRF[single-stage multi-route RRF<br/>k=60 equal weight]
+    DE --> RRF[single-stage multi-route RRF<br/>k=60 · dense dynamic weight]
     SP --> RRF
 
-    RRF --> AGG[multi-vector aggregation<br/>by source_chunk_id<br/>sum scores across vectors of same chunk]
-    AGG --> TOP[Top-N truncation<br/>RETRIEVE_TOP_N=200]
-    TOP --> EXT[④ smart follow-up selection<br/>1 LLM emits questions + unaskable coarse filter]
+    RRF --> AGG[multi-vector aggregation<br/>sum by source_chunk_id]
+    AGG --> TOP[RRF candidate-pool truncation<br/>RETRIEVE_TOP_N=200]
+    TOP --> EXT[④ smart follow-up selection<br/>reads state, picks dimensions]
     EXT -.multi-round follow-up.-> BQ
 
-    TOP --> RR[⑩ Step 0 Reranker<br/>BGE-MiniCPM layerwise<br/>fail → original-order fallback]
-    RR --> EXP[Context expansion<br/>child→parent + same-section figures]
-    EXP --> DG[⑩ single-step LLM diagnosis<br/>native multimodal]
+    TOP --> RR[⑩ Step 0 rerank + truncate<br/>RERANK_TOP_K=20]
+    RR --> EXP[⑩ Step 0.5 child → parent full text<br/>+ same-section figures]
+    EXP --> DG[⑩ single-step LLM diagnosis<br/>reads parent full text]
 
     classDef gpu fill:#dcfce7,stroke:#16a34a,color:#1a1a1a
     classDef key fill:#fef3c7,stroke:#d97706,color:#1a1a1a
     class DE,RR gpu
     class RRF,AGG,RR key
 ```
+
+> **Note**: sparse route count `N` is dynamic = chief complaint + 9 present-illness dims (list dims split per value) + report findings, deduped; in RRF the dense weight = `max(1, N/5)`, offsetting the many sparse routes crowding out the single dense route; Step 0 feeds the top-20 in RRF order to diagnosis, with the Reranker as an optional precision layer (eval confirms RRF order already suffices at K=20; it also falls back to RRF order on timeout).
 
 ---
 
